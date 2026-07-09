@@ -1,0 +1,5 @@
+Pillow>=10.0
+mss>=9.0
+numpy>=1.24
+soundcard>=0.4.3
+pyinstaller>=6.0

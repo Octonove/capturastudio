@@ -1,0 +1,24 @@
+0
+00:00:00,000 --> 00:00:02,200
+Hola, esto es captura estudio.
+
+1
+00:00:02,944 --> 00:00:05,944
+Vamos a probar los subtítulos automáticos y el recorte de...
+
+2
+00:00:05,888 --> 00:00:06,888
+silencios.
+
+3
+00:00:08,832 --> 00:00:11,832
+Hola, esto es captura estudi.
+
+4
+00:00:11,776 --> 00:00:15,776
+vamos a probarlo subtitulos automáticos
+
+5
+00:00:14,720 --> 00:00:16,720
+y el recorte de silencios.
+

@@ -1,0 +1,13 @@
+# Entornos y compilacion
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Salida de PyInstaller / Inno Setup
+/build/CapturaStudio/
+/build/*.log
+/build/icon_preview.png
+/dist/
+/installer/
