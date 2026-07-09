@@ -1041,7 +1041,7 @@ class App(tk.Tk):
         mb.add_cascade(label="Proyecto", menu=esc)
         ayuda = tk.Menu(mb, tearoff=0)
         ayuda.add_command(label="🤖 Asistente IA…", command=self._show_assistant)
-        ayuda.add_command(label="⚙ Configurar IA (Ollama)…", command=self._show_ollama_config)
+        ayuda.add_command(label="⚙ Configurar IA…", command=self._show_ollama_config)
         ayuda.add_command(label="Carpeta de salida…", command=self._set_output_dir)
         ayuda.add_command(label="Abrir carpeta de videos", command=self._open_videos)
         ayuda.add_command(label="Atajos de teclado", command=self._show_hotkeys)
@@ -1117,112 +1117,10 @@ class App(tk.Tk):
         win.grab_set()
 
     def _show_ollama_config(self) -> None:
-        win = tk.Toplevel(self)
-        theme.center_window(win)
-        win.title("Configurar IA (Ollama)")
-        win.configure(bg=theme.BG)
-        win.transient(self)
-        win.resizable(False, False)
-        frm = ttk.Frame(win, padding=18)
-        frm.pack(fill="both", expand=True)
-
-        ttk.Label(frm, text="IA local opcional con Ollama", style="H.TLabel").pack(anchor="w")
-        ttk.Label(frm, text="Mejora resumenes, autoexamen y el asistente. 100% en tu PC, gratis.\n"
-                  "CapturaStudio funciona sin esto; si lo instalas, se activa solo.",
-                  style="Muted.TLabel", justify="left").pack(anchor="w", pady=(2, 12))
-
-        # Detectar el PC y recomendar un modelo concreto (sin que el usuario elija).
-        has_gpu = any(e in self.encoders for e in ("h264_nvenc", "h264_amf"))
-        ram = llm.system_ram_gb()
-        rec_model, rec_size, rec_why = llm.recommend_model(ram, has_gpu)
-        pc = (f"Tu PC: ~{ram:.0f} GB de RAM · "
-              + ("con tarjeta grafica dedicada" if has_gpu else "sin tarjeta grafica dedicada")
-              if ram else "Tu PC: no se pudo leer la memoria")
-        ttk.Label(frm, text=pc, style="Muted.TLabel").pack(anchor="w")
-        ttk.Label(frm, text=f"✨ Modelo recomendado para ti: {rec_model}  ({rec_size}) — {rec_why}",
-                  style="H.TLabel", wraplength=440, justify="left").pack(anchor="w", pady=(2, 10))
-
-        lbl_status = ttk.Label(frm, style="H.TLabel")
-        lbl_status.pack(anchor="w")
-        lbl_sub = ttk.Label(frm, style="Muted.TLabel", justify="left")
-        lbl_sub.pack(anchor="w", pady=(2, 8))
-
-        row = ttk.Frame(frm)
-        row.pack(fill="x", pady=(0, 4))
-        ttk.Label(row, text="Modelo a usar:", style="Muted.TLabel").pack(side="left")
-        var_model = tk.StringVar()
-        combo = ttk.Combobox(row, textvariable=var_model, state="readonly", width=26)
-        combo.pack(side="left", padx=8)
-
-        # Guia para no-tecnicos: que es una terminal, como abrirla y el comando exacto.
-        guide = ttk.LabelFrame(frm, text="Como instalarlo (una sola vez, ~5 min)", padding=10)
-        cmd_text = f"ollama pull {rec_model}"
-        steps = (
-            "1.  Pulsa 'Abrir ollama.com', descarga Ollama e instalalo (Siguiente, Siguiente).\n"
-            "2.  Abre una TERMINAL: es una ventana para escribir instrucciones.\n"
-            "      Pulsa la tecla Windows, escribe  cmd  y pulsa Enter.\n"
-            "3.  Pega este comando (clic en 'Copiar comando'), pulsa Enter y espera:\n")
-        lbl_steps = ttk.Label(guide, text=steps, style="Muted.TLabel", justify="left")
-        lbl_steps.pack(anchor="w")
-        cmd_row = ttk.Frame(guide)
-        cmd_row.pack(fill="x", pady=(2, 4))
-        cmd_box = tk.Entry(cmd_row, width=30, font=("Consolas", 10), relief="flat",
-                           bg=theme.WHITE, fg=theme.TEXT, highlightthickness=1,
-                           highlightbackground=theme.BORDER)
-        cmd_box.insert(0, cmd_text)
-        cmd_box.config(state="readonly")
-        cmd_box.pack(side="left")
-
-        def copy_cmd():
-            self.clipboard_clear()
-            self.clipboard_append(cmd_text)
-            self.update()
-            self._set_status("Comando copiado: pegalo en la terminal con Ctrl+V")
-        ttk.Button(cmd_row, text="📋 Copiar comando", command=copy_cmd).pack(side="left", padx=8)
-        ttk.Label(guide, text="4.  Cuando acabe la descarga, vuelve aqui y pulsa 'Volver a comprobar'.",
-                  style="Muted.TLabel").pack(anchor="w")
-        guide.pack(fill="x", pady=(4, 0))
-
-        btns = ttk.Frame(frm)
-        btns.pack(fill="x", pady=(14, 0))
-        btn_save = ttk.Button(btns, text="Usar este modelo", style="Primary.TButton")
-
-        def refresh():
-            llm.reset_cache()
-            mods = llm.list_models()
-            if mods:
-                lbl_status.config(text="✅ Ollama activo")
-                lbl_sub.config(text=f"{len(mods)} modelo(s) instalado(s). Elige cual usar:")
-                combo.config(values=mods, state="readonly")
-                cur = (self.cfg.ollama_model if self.cfg.ollama_model in mods
-                       else (rec_model if rec_model in mods else (llm.default_model() or mods[0])))
-                var_model.set(cur)
-                btn_save.config(state="normal")
-                guide.pack_forget()         # ya esta instalado: ocultar la guia
-            else:
-                lbl_status.config(text="❌ Ollama no detectado")
-                lbl_sub.config(text="Ahora se usan las heuristicas locales (sin redactar). Sigue los pasos:")
-                combo.config(values=[], state="disabled")
-                var_model.set("")
-                btn_save.config(state="disabled")
-                guide.pack(fill="x", pady=(4, 0))
-
-        def save():
-            m = var_model.get().strip()
-            self.cfg.ollama_model = m
-            save_config(self.cfg)
-            llm.set_model(m or None)
-            self._set_status(f"Modelo IA: {m or 'auto'}")
-            win.destroy()
-
-        btn_save.config(command=save)
-        ttk.Button(btns, text="Cerrar", command=win.destroy).pack(side="right")
-        btn_save.pack(side="right", padx=(0, 8))
-        ttk.Button(btns, text="Volver a comprobar", command=refresh).pack(side="left")
-        ttk.Button(btns, text="Abrir ollama.com",
-                   command=lambda: webbrowser.open("https://ollama.com")).pack(side="left", padx=(8, 0))
-        refresh()
-        win.grab_set()
+        # Dialogo de IA UNIFICADO de la suite: Ollama local (gratis) o una API
+        # potente (OpenAI/Gemini/Anthropic). Se configura una vez para las 5 apps.
+        from octonove_core.ai_dialog import show_ai_dialog
+        show_ai_dialog(self, on_saved=lambda: self._set_status("IA configurada."))
 
     def _open_teacher_mode(self, profile: str = "docente") -> None:
         # compatibilidad: ahora cambia el MODO de la ventana, no abre un pop-up
