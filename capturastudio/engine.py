@@ -53,6 +53,11 @@ class RecordEngine:
         self.state = "idle"
         self._watch: threading.Thread | None = None
 
+    @property
+    def audio_problems(self) -> list[str]:
+        """Avisos legibles de las pistas de audio (p.ej. micro que no abrio)."""
+        return list(self._audio.problems)
+
     # -- ciclo de vida -----------------------------------------------------
     def start(self) -> None:
         with self._lock:

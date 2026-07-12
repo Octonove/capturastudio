@@ -6,32 +6,33 @@ publica el nivel de pico (0..1 lineal) del ultimo bloque. La UI lo lee sin lock
 
 Es un MONITOR opcional: abrir el microfono enciende su indicador en algunos
 equipos, asi que se activa/desactiva a peticion del usuario, nunca solo.
+
+soundcard se carga perezosamente via audio_capture._load() y SOLO en el hilo
+del medidor (importarlo en el hilo de la UI inicializa COM/MTA y congela los
+dialogos nativos de Tk). db_to_unit usa math, no numpy, por la misma razon:
+lo llama el hilo de la UI en cada tick.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import threading
+
+from .audio_capture import AVAILABLE, BLOCK as _CAP_BLOCK  # noqa: F401 (AVAILABLE re-export)
+from . import audio_capture as _cap
 
 logger = logging.getLogger(__name__)
 
 SR = 48000
 BLOCK = 1024  # ~21 ms: refresco fluido sin saturar la CPU
 
-try:
-    import numpy as np
-    import soundcard as sc
-    AVAILABLE = True
-except Exception as exc:  # noqa: BLE001
-    AVAILABLE = False
-    logger.warning("Medidores VU no disponibles (soundcard/numpy): %s", exc)
-
 
 def db_to_unit(peak: float, floor_db: float = -60.0) -> float:
     """Mapea un pico lineal 0..1 a 0..1 perceptual usando dBFS (floor_db..0)."""
     if peak <= 1e-6:
         return 0.0
-    db = 20.0 * np.log10(min(peak, 1.0)) if AVAILABLE else floor_db
+    db = 20.0 * math.log10(min(peak, 1.0))
     if db <= floor_db:
         return 0.0
     return float((db - floor_db) / (0.0 - floor_db))
@@ -66,7 +67,7 @@ class AudioMeter:
         self._thread = None
         self.sys = self.mic = 0.0
 
-    def _open(self):
+    def _open(self, sc):
         """Devuelve [(recorder_ctx, atributo)] abiertos. Cada uno es best-effort."""
         opened = []
         if self.system:
@@ -80,10 +81,11 @@ class AudioMeter:
                 logger.warning("VU: loopback no disponible: %s", exc)
         if self.mic_name:
             try:
-                mic = next((m for m in sc.all_microphones(include_loopback=False)
-                            if m.name == self.mic_name), None) or sc.default_microphone()
-                rec = mic.recorder(samplerate=SR, channels=1, blocksize=BLOCK)
-                rec.__enter__()
+                mic = _cap.find_microphone(sc, self.mic_name)
+                # open robusto: los micros USB mono rechazan configs exactas y sin
+                # fallback el medidor se quedaba a cero (parecia que no captaba).
+                rec, _, _ = _cap.open_recorder(mic, samplerates=(SR, 44100),
+                                               blocksize=BLOCK)
                 opened.append((rec, "mic"))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("VU: microfono no disponible: %s", exc)
@@ -96,7 +98,11 @@ class AudioMeter:
             ctypes.windll.ole32.CoInitializeEx(None, 0x0)
         except (AttributeError, OSError):
             pass
-        opened = self._open()
+        libs = _cap._load()
+        if libs is None:
+            return
+        np, sc = libs
+        opened = self._open(sc)
         if not opened:
             try:
                 ctypes.windll.ole32.CoUninitialize()

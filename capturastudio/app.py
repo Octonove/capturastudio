@@ -72,7 +72,10 @@ class App(tk.Tk):
         # __init__ (_probe_ffmpeg_caps); mientras, estos valores seguros.
         self.encoders = {"libx264"}
         self.video_devices = []
-        self.mics = list_microphones()
+        # Los microfonos se listan en un hilo (_probe_ffmpeg_caps): enumerar con
+        # soundcard aqui importaria soundcard en el hilo de la UI, y su init de
+        # COM (MTA) congelaba los dialogos nativos ("Carpeta de salida…").
+        self.mics: list[str] = []
 
         cw, ch = CANVAS_PRESETS.get(self.cfg.canvas, (1920, 1080))
         self.scene = scn.Scene(canvas_w=cw, canvas_h=ch, fps=self.cfg.fps)
@@ -121,8 +124,25 @@ class App(tk.Tk):
             self.after(400, self._show_welcome)
 
     def _probe_ffmpeg_caps(self) -> None:
-        """Sondea encoders disponibles y camaras dshow en segundo plano (subprocesos
-        de FFmpeg). Al terminar refresca el combobox de encoder en el hilo de UI."""
+        """Sondea encoders, camaras dshow y microfonos en segundo plano. Los
+        microfonos DEBEN enumerarse aqui (hilo de trabajo): la primera vez carga
+        soundcard, que inicializa COM en el hilo llamante. Al terminar refresca
+        los combobox en el hilo de UI."""
+        mics = list_microphones()
+
+        def apply_mics():
+            self.mics = mics
+            try:
+                self.cmb_mic.config(values=mics)
+                if mics and self.var_micdev.get() not in mics:
+                    self.var_micdev.set(mics[0])
+            except (tk.TclError, AttributeError):
+                pass
+        try:
+            self.after(0, apply_mics)
+        except (RuntimeError, tk.TclError):
+            return
+
         if not self.ffmpeg:
             return
         enc = fu.list_encoders(self.ffmpeg)
@@ -433,9 +453,12 @@ class App(tk.Tk):
                         command=self._on_setting).pack(side="left")
         ttk.Checkbutton(au, text="Micro", variable=self.var_mic,
                         command=self._on_setting).pack(side="left", padx=(8, 4))
-        if self.mics:
-            ttk.Combobox(au, textvariable=self.var_micdev, values=self.mics, width=16,
-                         state="readonly").pack(side="left")
+        # Siempre presente: la lista de micros llega en segundo plano
+        # (_probe_ffmpeg_caps) y se rellena entonces via cmb_mic.config(values=…).
+        self.cmb_mic = ttk.Combobox(au, textvariable=self.var_micdev, values=self.mics,
+                                    width=16, state="readonly")
+        self.cmb_mic.pack(side="left")
+        self.cmb_mic.bind("<<ComboboxSelected>>", self._on_setting)
         ttk.Checkbutton(au, text="Reducir ruido", variable=self.var_denoise,
                         command=self._on_setting).pack(side="left", padx=(8, 0))
 
@@ -696,10 +719,11 @@ class App(tk.Tk):
                 logger.debug("preview src %s: %s", s.kind, exc)
         self._boxes = boxes
 
-        prev = canvas.resize((PREVIEW_W, PREVIEW_H))
+        ox, oy, pw, ph = self._pv_rect()
+        prev = canvas.resize((pw, ph))
         self._preview_imgtk = ImageTk.PhotoImage(prev)
         self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor="nw", image=self._preview_imgtk)
+        self.canvas.create_image(ox, oy, anchor="nw", image=self._preview_imgtk)
         self._draw_selection_handles()
         badge = None
         if self.engine and self.engine.state in ("recording", "paused"):
@@ -708,7 +732,7 @@ class App(tk.Tk):
         elif self.replay and self.replay.state == "buffering":
             badge = "⏺ BUFFER"
         if badge:
-            self.canvas.create_text(12, 12, anchor="nw", text=badge, fill="#EF4444",
+            self.canvas.create_text(ox + 12, oy + 12, anchor="nw", text=badge, fill="#EF4444",
                                     font=(theme.FONT, 14, "bold"))
         if self.stream_engine and self.stream_engine.state == "streaming":
             drop = getattr(self.stream_engine, "dropped", 0)
@@ -751,12 +775,27 @@ class App(tk.Tk):
         d.text((t.x + 14, t.y + h // 2 - 10), s.label(), fill=(255, 255, 255, 255))
         return w, h
 
+    def _pv_rect(self) -> tuple[int, int, int, int]:
+        """(ox, oy, ancho, alto) del preview DENTRO del widget: escalado al
+        tamano real del canvas manteniendo la proporcion y CENTRADO. Antes se
+        dibujaba fijo a 640x360 anclado arriba-izquierda, y al maximizar la
+        ventana quedaba 'pegado a la esquina' con un mar oscuro alrededor."""
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        if cw < 40 or ch < 40:      # el layout aun no dio tamano: usa el minimo
+            return 0, 0, PREVIEW_W, PREVIEW_H
+        r = min(cw / self.scene.canvas_w, ch / self.scene.canvas_h)
+        pw = max(1, int(self.scene.canvas_w * r))
+        ph = max(1, int(self.scene.canvas_h * r))
+        return (cw - pw) // 2, (ch - ph) // 2, pw, ph
+
     # -- preview interactivo (arrastrar / redimensionar) ------------------
     def _to_canvas(self, px, py):
-        return (px * self.scene.canvas_w / PREVIEW_W, py * self.scene.canvas_h / PREVIEW_H)
+        ox, oy, pw, ph = self._pv_rect()
+        return ((px - ox) * self.scene.canvas_w / pw, (py - oy) * self.scene.canvas_h / ph)
 
     def _to_preview(self, cx, cy):
-        return (cx * PREVIEW_W / self.scene.canvas_w, cy * PREVIEW_H / self.scene.canvas_h)
+        ox, oy, pw, ph = self._pv_rect()
+        return (cx * pw / self.scene.canvas_w + ox, cy * ph / self.scene.canvas_h + oy)
 
     def _draw_selection_handles(self) -> None:
         if not self._sel_id or self._sel_id not in self._boxes:
@@ -864,8 +903,14 @@ class App(tk.Tk):
         elif state == "saved":
             self.btn_rec.config(text="●  Grabar", state="normal")
             self.btn_pause.config(state="disabled", text="⏸ Pausa")
+            # Avisos de audio (p.ej. el micro elegido no se pudo abrir): antes se
+            # perdian en el log y el usuario descubria el silencio al reproducir.
+            problems = self.engine.audio_problems if self.engine else []
             self.engine = None
             self._rec_t0 = None
+            if problems:
+                messagebox.showwarning(APP_NAME, "El video se guardo, pero:\n\n"
+                                       + "\n".join(f"• {p}" for p in problems))
             # si habia una parada programada pendiente, ya no aplica
             if self._sched_stop_id:
                 try:
@@ -1134,7 +1179,7 @@ class App(tk.Tk):
 
     def _set_output_dir(self) -> None:
         d = filedialog.askdirectory(title="Carpeta donde guardar los videos",
-                                    initialdir=self.cfg.videos_dir)
+                                    initialdir=self.cfg.videos_dir, parent=self)
         if d:
             self.cfg.videos_dir = d
             save_config(self.cfg)

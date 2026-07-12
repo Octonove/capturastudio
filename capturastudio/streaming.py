@@ -123,9 +123,10 @@ class AudioPipe:
 
     @property
     def enabled(self) -> bool:
-        try:
-            import soundcard  # noqa: F401
-        except Exception:  # noqa: BLE001
+        # find_spec no ejecuta el modulo: importar soundcard aqui (hilo de la UI)
+        # inicializaria COM/MTA y congelaria los dialogos nativos de Tk.
+        import importlib.util
+        if importlib.util.find_spec("soundcard") is None:
             return False
         return self.system or bool(self.mic_name)
 
@@ -147,10 +148,12 @@ class AudioPipe:
                 logger.warning("Loopback no disponible para streaming: %s", exc)
         if self.mic_name:
             try:
-                mic = next((m for m in sc.all_microphones(include_loopback=False)
-                            if m.name == self.mic_name), None) or sc.default_microphone()
-                r = mic.recorder(samplerate=SR, channels=2, blocksize=BLOCK)
-                r.__enter__()
+                from .audio_capture import find_microphone, open_recorder
+                mic = find_microphone(sc, self.mic_name)
+                # open robusto (los micros USB mono rechazan 48k/2ch exactos). El
+                # samplerate se fija a SR porque el pipe hacia FFmpeg es s16le/SR:
+                # solo se negocian los canales; el mono se duplica al mezclar.
+                r, _, _ = open_recorder(mic, samplerates=(SR,), blocksize=BLOCK)
                 recs.append(r)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Microfono no disponible para streaming: %s", exc)
@@ -177,9 +180,18 @@ class AudioPipe:
             except (AttributeError, OSError):
                 pass
             return
+        def stereo(b):
+            # El pipe declara a FFmpeg s16le ESTEREO: un buffer mono (micro USB
+            # abierto con 1 canal) debe duplicarse o el audio saldria acelerado.
+            if b.ndim == 1:
+                b = b[:, None]
+            if b.shape[1] == 1:
+                b = np.repeat(b, 2, axis=1)
+            return b[:, :2]
+
         try:
             while not self._stop.is_set():
-                bufs = [r.record(numframes=BLOCK) for r in recs]
+                bufs = [stereo(r.record(numframes=BLOCK)) for r in recs]
                 mix = bufs[0] if len(bufs) == 1 else np.clip(sum(bufs), -1.0, 1.0)
                 pcm = (np.clip(mix, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
                 try:

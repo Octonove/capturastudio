@@ -381,3 +381,108 @@ def test_scene_from_dict_robusto():
     sc = scn.Scene.from_dict(d)
     assert len(sc.sources) == 1
     assert sc.sources[0].transform.crop is None
+
+
+# --- Audio: apertura robusta del microfono (feedback tester: mic USB) -------
+class _FakeRecorder:
+    def __init__(self):
+        self.entered = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeDevice:
+    """Simula un micro USB mono que rechaza 48 kHz estereo (el caso del tester:
+    aparecia en la lista pero la pista fallaba y se perdia en silencio)."""
+
+    def __init__(self, name="Micrófono (2- USB PnP Sound Device)", accepts=((44100, 1),)):
+        self.name = name
+        self.channels = 1
+        self._accepts = set(accepts)
+
+    def recorder(self, samplerate, channels, blocksize):
+        if (samplerate, channels) not in self._accepts:
+            raise RuntimeError(f"formato no soportado: {samplerate}/{channels}")
+        return _FakeRecorder()
+
+
+def test_open_recorder_fallback_usb_mono():
+    from capturastudio import audio_capture as cap
+    dev = _FakeDevice(accepts=((44100, 1),))
+    rec, sr, chn = cap.open_recorder(dev)
+    assert (sr, chn) == (44100, 1) and rec.entered
+
+
+def test_open_recorder_prefiere_config_nativa():
+    from capturastudio import audio_capture as cap
+    dev = _FakeDevice(accepts=((48000, 1), (44100, 1)))
+    rec, sr, chn = cap.open_recorder(dev)
+    assert (sr, chn) == (48000, 1)      # respeta 48k si el dispositivo lo acepta
+
+
+def test_open_recorder_todo_falla():
+    from capturastudio import audio_capture as cap
+    import pytest
+    with pytest.raises(RuntimeError):
+        cap.open_recorder(_FakeDevice(accepts=()))
+
+
+def test_find_microphone_matching():
+    from capturastudio import audio_capture as cap
+
+    class _SC:
+        def all_microphones(self, include_loopback=False):
+            return [_FakeDevice("Micrófono (Razer Seiren X)"),
+                    _FakeDevice("Micrófono (2- USB PnP Sound Device)")]
+
+        def default_microphone(self):
+            return _FakeDevice("DEFAULT")
+
+    sc = _SC()
+    assert cap.find_microphone(sc, "Micrófono (Razer Seiren X)").name.endswith("Seiren X)")
+    # subcadena: el sufijo WASAPI puede variar entre sesiones
+    assert cap.find_microphone(sc, "2- USB PnP").name.endswith("Sound Device)")
+    # no encontrado -> predeterminado (con warning, no en silencio)
+    assert cap.find_microphone(sc, "No Existe").name == "DEFAULT"
+
+
+# --- Preview centrado (feedback tester: se veia pegada a la esquina) --------
+def test_pv_rect_centra_y_escala():
+    from types import SimpleNamespace
+    from capturastudio.app import App
+
+    class _FakeCanvas:
+        def __init__(self, w, h):
+            self._w, self._h = w, h
+
+        def winfo_width(self):
+            return self._w
+
+        def winfo_height(self):
+            return self._h
+
+    fake = SimpleNamespace(canvas=_FakeCanvas(1280, 500),
+                           scene=SimpleNamespace(canvas_w=1920, canvas_h=1080))
+    ox, oy, pw, ph = App._pv_rect(fake)
+    assert (pw, ph) == (888, 500)            # limita el alto y mantiene 16:9
+    assert ox == (1280 - 888) // 2 and oy == 0   # centrado horizontal
+    # widget aun sin layout -> tamano minimo historico, sin division por cero
+    fake2 = SimpleNamespace(canvas=_FakeCanvas(1, 1),
+                            scene=SimpleNamespace(canvas_w=1920, canvas_h=1080))
+    assert App._pv_rect(fake2) == (0, 0, 640, 360)
+
+
+def test_audiopipe_stereo_upmix():
+    # un buffer mono debe duplicarse a estereo antes de escribir al pipe s16le
+    import numpy as np
+    mono = np.ones((256, 1), dtype="float32") * 0.5
+    if mono.ndim == 1:
+        mono = mono[:, None]
+    if mono.shape[1] == 1:
+        up = np.repeat(mono, 2, axis=1)
+    assert up.shape == (256, 2) and float(up[0, 1]) == 0.5
