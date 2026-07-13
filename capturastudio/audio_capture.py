@@ -97,11 +97,11 @@ def list_microphones() -> list[str]:
             _com_uninit()
 
 
-def find_microphone(sc, name: str):
+def find_microphone(sc, name: str, on_fallback=None):
     """Microfono por nombre exacto; si no, por subcadena (WASAPI a veces varia
-    el sufijo del nombre); en ultimo recurso el predeterminado, con un warning
-    claro (antes se caia al predeterminado EN SILENCIO y parecia que el micro
-    elegido 'no captaba nada')."""
+    el sufijo del nombre); en ultimo recurso el predeterminado. Si se cae al
+    predeterminado se avisa via `on_fallback(mic)` ademas del warning: grabar
+    con OTRO micro sin decirlo hace creer que el elegido 'no captaba nada'."""
     mics = sc.all_microphones(include_loopback=False)
     m = next((x for x in mics if x.name == name), None)
     if m is None and name:
@@ -109,6 +109,8 @@ def find_microphone(sc, name: str):
     if m is None:
         logger.warning("Microfono '%s' no encontrado; se usa el predeterminado.", name)
         m = sc.default_microphone()
+        if on_fallback:
+            on_fallback(m)
     return m
 
 
@@ -149,12 +151,19 @@ class AudioCapture:
     """Captura system/mic a WAV(s) en hilos; soporta pausa/reanudar.
 
     Toda interaccion con soundcard (enumerar, abrir, grabar) ocurre DENTRO del
-    hilo de cada pista, nunca en el hilo que construye/arranca esta clase."""
+    hilo de cada pista, nunca en el hilo que construye/arranca esta clase.
 
-    def __init__(self, system: bool, mic_name: str | None, work_dir: str):
+    Si soundcard/WASAPI no puede abrir el microfono (algunos micros USB PnP
+    reportan un formato de mezcla no EXTENSIBLE y soundcard aborta con un
+    AssertionError vacio), se cae a grabar ese micro con FFmpeg/DirectShow."""
+
+    def __init__(self, system: bool, mic_name: str | None, work_dir: str,
+                 ffmpeg: str = ""):
         self.system = bool(system) and AVAILABLE
-        self.mic_name = mic_name if AVAILABLE else None
+        # el micro tiene via de respaldo por FFmpeg: no exige soundcard
+        self.mic_name = mic_name
         self.work_dir = work_dir
+        self.ffmpeg = ffmpeg
         self._stop = threading.Event()
         self._paused = threading.Event()
         self._tracks: list[_Track] = []
@@ -162,7 +171,8 @@ class AudioCapture:
 
     @property
     def enabled(self) -> bool:
-        return AVAILABLE and (self.system or bool(self.mic_name))
+        # el sistema exige soundcard; el micro funciona con soundcard O ffmpeg
+        return self.system or bool(self.mic_name and (AVAILABLE or self.ffmpeg))
 
     def start(self) -> None:
         if not self.enabled:
@@ -179,11 +189,18 @@ class AudioCapture:
         if kind == "system":
             spk = sc.default_speaker()
             return sc.get_microphone(id=str(spk.name), include_loopback=True)
-        return find_microphone(sc, self.mic_name or "")
+        return find_microphone(
+            sc, self.mic_name or "",
+            on_fallback=lambda m: self.problems.append(
+                f"El microfono «{self.mic_name}» no aparecio; se grabo con "
+                f"«{m.name}» (el predeterminado)."))
 
     def _run(self, track: _Track) -> None:
         libs = _load()
         if libs is None:
+            # sin soundcard/numpy: el micro aun puede grabarse via FFmpeg
+            if track.kind == "mic" and self.ffmpeg:
+                self._intentar_dshow(track, None)
             return
         np, sc = libs
         co = _com_init()   # COM por-hilo: WASAPI lo EXIGE en el hilo que graba
@@ -208,9 +225,12 @@ class AudioCapture:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Captura de audio (%s) fallo: %s", track.kind, exc)
             track.ok = False
-            nombre = "el audio del sistema" if track.kind == "system" else \
-                f"el microfono «{self.mic_name}»"
-            self.problems.append(f"No se pudo grabar {nombre}: {exc}")
+            if track.kind == "mic" and self.ffmpeg and not self._stop.is_set():
+                # FALLBACK: DirectShow via FFmpeg. Algunos micros USB (p.ej.
+                # 'USB PnP Audio Device') no se pueden abrir con soundcard.
+                self._intentar_dshow(track, exc)
+            else:
+                self._reportar_fallo(track, exc)
         finally:
             if rec is not None:
                 try:
@@ -219,6 +239,166 @@ class AudioCapture:
                     pass
             if co:
                 _com_uninit()   # tras liberar el recorder (mantiene objetos COM)
+
+    def _reportar_fallo(self, track: _Track, exc: Exception | None) -> None:
+        nombre = "el audio del sistema" if track.kind == "system" else \
+            f"el microfono «{self.mic_name}»"
+        # los AssertionError de soundcard llegan con mensaje VACIO: dar el tipo
+        detalle = (str(exc).strip() or type(exc).__name__) if exc else "sin detalle"
+        self.problems.append(f"No se pudo grabar {nombre}: {detalle}")
+
+    def _intentar_dshow(self, track: _Track, exc_original: Exception | None) -> None:
+        try:
+            if self._grabar_dshow(track):
+                track.ok = True
+                logger.info("Micro «%s» grabado via FFmpeg/DirectShow (fallback).",
+                            self.mic_name)
+                return
+        except Exception as exc2:  # noqa: BLE001
+            logger.warning("Fallback dshow fallo: %s", exc2)
+        self._reportar_fallo(track, exc_original)
+
+    # ------------------------------------------------ fallback FFmpeg/dshow
+    def _listar_dshow_audio(self) -> list[str]:
+        """Nombres de dispositivos de audio segun DirectShow (via FFmpeg)."""
+        import re
+        import subprocess
+        from octonove_core.procutil import subprocess_kwargs
+        try:
+            p = subprocess.run([self.ffmpeg, "-hide_banner", "-list_devices", "true",
+                                "-f", "dshow", "-i", "dummy"],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=10, **subprocess_kwargs())
+        except (OSError, subprocess.SubprocessError):
+            return []
+        devs = []
+        for ln in (p.stderr or "").splitlines():
+            m = re.search(r'"([^"]+)"\s*\(audio', ln)
+            if m:
+                devs.append(m.group(1))
+        return devs
+
+    @staticmethod
+    def _dshow_match(wanted: str, devs: list[str]) -> str | None:
+        """El nombre dshow puede diferir un poco del WASAPI: exacto, subcadena
+        o el mas parecido."""
+        if not devs:
+            return None
+        if wanted in devs:
+            return wanted
+        for d in devs:
+            if wanted and (wanted in d or d in wanted):
+                return d
+        import difflib
+        close = difflib.get_close_matches(wanted or "", devs, n=1, cutoff=0.5)
+        return close[0] if close else None
+
+    def _grabar_dshow(self, track: _Track) -> bool:
+        """Graba el micro con FFmpeg -f dshow hasta que paren la captura.
+        La pausa se implementa por segmentos (parar/relanzar FFmpeg), igual que
+        hace el video, y al final se unen los WAV."""
+        import subprocess
+        from octonove_core.procutil import subprocess_kwargs
+        dev = self._dshow_match(self.mic_name or "", self._listar_dshow_audio())
+        if not dev:
+            logger.warning("dshow: no se encontro dispositivo para «%s»", self.mic_name)
+            return False
+        logger.info("dshow: usando dispositivo «%s»", dev)
+        segs: list[str] = []
+        proc = None
+
+        def _arrancar():
+            s = f"{track.wav_path}.seg{len(segs)}.wav"
+            cmd = [self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                   "-f", "dshow", "-i", f"audio={dev}",
+                   "-ar", str(SAMPLERATE), "-ac", "2", "-c:a", "pcm_s16le", s]
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 **subprocess_kwargs())
+            segs.append(s)
+            return p
+
+        def _parar(p) -> None:
+            if p is None or p.poll() is not None:
+                return
+            try:
+                p.stdin.write(b"q")
+                p.stdin.flush()
+            except (OSError, ValueError):
+                pass
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.terminate()
+                try:
+                    p.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+
+        try:
+            proc = _arrancar()
+            # si FFmpeg muere nada mas arrancar, el dispositivo no vale
+            if self._stop.wait(1.0):
+                pass
+            if proc.poll() is not None and not self._stop.is_set():
+                return False
+            while not self._stop.is_set():
+                if self._paused.is_set():
+                    if proc is not None:
+                        _parar(proc)
+                        proc = None
+                else:
+                    if proc is None:
+                        proc = _arrancar()
+                    elif proc.poll() is not None:
+                        # el micro se cayo a mitad: conservar lo grabado
+                        logger.warning("dshow: FFmpeg termino inesperadamente.")
+                        break
+                self._stop.wait(0.15)
+            _parar(proc)
+            proc = None
+            return self._unir_wavs(segs, track.wav_path)
+        finally:
+            if proc is not None:
+                _parar(proc)
+            for s in segs:
+                try:
+                    Path(s).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _unir_wavs(segs: list[str], out: str) -> bool:
+        """Une segmentos WAV homogeneos en uno, por bloques (sin cargar en RAM)."""
+        params = None
+        with_data = []
+        for s in segs:
+            try:
+                r = wave.open(s, "rb")
+            except (OSError, wave.Error, EOFError):
+                continue
+            if r.getnframes() > 0:
+                with_data.append((s, r.getparams()))
+            r.close()
+        if not with_data:
+            return False
+        params = with_data[0][1]
+        try:
+            w = wave.open(out, "wb")
+        except (OSError, wave.Error):
+            return False
+        try:
+            w.setparams(params)
+            for s, _ in with_data:
+                with wave.open(s, "rb") as r:
+                    while True:
+                        chunk = r.readframes(SAMPLERATE)  # ~1 s por bloque
+                        if not chunk:
+                            break
+                        w.writeframes(chunk)
+        finally:
+            w.close()
+        return Path(out).is_file() and Path(out).stat().st_size > 1024
 
     def pause(self) -> None:
         self._paused.set()

@@ -45,7 +45,9 @@ class RecordEngine:
         self.on_error = on_error or (lambda *a: None)
 
         self._work = work_dir()
-        self._audio = AudioCapture(audio_system, audio_mic_device or None, str(self._work))
+        # ffmpeg permite el respaldo DirectShow para micros que WASAPI no abre
+        self._audio = AudioCapture(audio_system, audio_mic_device or None,
+                                   str(self._work), ffmpeg=str(ffmpeg_path or ""))
         self._segments: list[Path] = []
         self._proc: subprocess.Popen | None = None
         self._seg_log = self._work / ".cs_ffmpeg.log"
