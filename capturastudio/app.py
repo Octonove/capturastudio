@@ -1502,7 +1502,8 @@ class App(tk.Tk):
                 messagebox.showinfo(APP_NAME,
                                     "Activa 'Audio sistema' o 'Micro' para monitorizar el nivel.")
                 return
-            self.meter = meters.AudioMeter(sys_on, mic_dev)
+            # ffmpeg: respaldo DirectShow para el VU de micros que WASAPI no abre
+            self.meter = meters.AudioMeter(sys_on, mic_dev, ffmpeg=self.ffmpeg)
             self.meter.start()
             self._meter_gen += 1          # nueva generacion del bucle de refresco
             self._tick_meters(self._meter_gen)

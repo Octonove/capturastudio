@@ -41,9 +41,11 @@ def db_to_unit(peak: float, floor_db: float = -60.0) -> float:
 class AudioMeter:
     """Publica `sys` y `mic` (pico 0..1 del ultimo bloque). best-effort."""
 
-    def __init__(self, system: bool, mic_name: str | None):
+    def __init__(self, system: bool, mic_name: str | None, ffmpeg: str = ""):
         self.system = bool(system) and AVAILABLE
-        self.mic_name = mic_name if AVAILABLE else None
+        # el micro tiene respaldo DirectShow: no exige soundcard
+        self.mic_name = mic_name
+        self.ffmpeg = ffmpeg
         self.sys = 0.0
         self.mic = 0.0
         self._stop = threading.Event()
@@ -51,7 +53,7 @@ class AudioMeter:
 
     @property
     def enabled(self) -> bool:
-        return AVAILABLE and (self.system or bool(self.mic_name))
+        return self.system or bool(self.mic_name and (AVAILABLE or self.ffmpeg))
 
     def start(self) -> None:
         if not self.enabled or self._thread:
@@ -103,7 +105,15 @@ class AudioMeter:
             return
         np, sc = libs
         opened = self._open(sc)
-        if not opened:
+        # Si el micro se pidio pero soundcard no pudo abrirlo (tipico en micros
+        # USB PnP), medir su nivel por FFmpeg/DirectShow en un hilo aparte, para
+        # que el VU no se quede plano aunque el video SI se grabe por esa via.
+        mic_por_sc = any(a == "mic" for _, a in opened)
+        dshow_thread = None
+        if self.mic_name and not mic_por_sc and self.ffmpeg:
+            dshow_thread = threading.Thread(target=self._dshow_mic_vu, daemon=True)
+            dshow_thread.start()
+        if not opened and dshow_thread is None:
             try:
                 ctypes.windll.ole32.CoUninitialize()
             except (AttributeError, OSError):
@@ -111,6 +121,9 @@ class AudioMeter:
             return
         try:
             while not self._stop.is_set():
+                if not opened:
+                    self._stop.wait(0.05)   # solo micro por dshow: no bloquear
+                    continue
                 for rec, attr in opened:
                     try:
                         data = rec.record(numframes=BLOCK)
@@ -124,7 +137,35 @@ class AudioMeter:
                     rec.__exit__(None, None, None)
                 except Exception:  # noqa: BLE001
                     pass
+            if dshow_thread is not None:
+                dshow_thread.join(timeout=3)
             try:
                 ctypes.windll.ole32.CoUninitialize()
             except (AttributeError, OSError):
                 pass
+
+    def _dshow_mic_vu(self) -> None:
+        """Publica self.mic leyendo PCM del micro por FFmpeg/DirectShow."""
+        import numpy as np
+        from octonove_core import dshow
+        dev = dshow.match_device(self.mic_name or "", dshow.list_audio_devices(self.ffmpeg))
+        if not dev:
+            return
+        ch = 2
+        nbytes = BLOCK * ch * 2
+        proc = dshow.open_pcm(self.ffmpeg, dev, SR, ch)
+        try:
+            while not self._stop.is_set():
+                chunk = proc.stdout.read(nbytes)
+                if not chunk:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                n = len(chunk) - (len(chunk) % 2)
+                if n:
+                    self.mic = float(np.abs(np.frombuffer(chunk[:n], dtype="<i2")).max()) / 32768.0
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("VU dshow fallo: %s", exc)
+        finally:
+            self.mic = 0.0
+            dshow.stop_pcm(proc)

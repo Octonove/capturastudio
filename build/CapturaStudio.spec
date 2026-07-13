@@ -28,7 +28,7 @@ a = Analysis(
     binaries=binaries,
     datas=[],
     hiddenimports=['PIL._tkinter_finder', 'soundcard', 'soundcard.mediafoundation',
-                   '_cffi_backend'],
+                   '_cffi_backend', 'octonove_core.dshow'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
