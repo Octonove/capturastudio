@@ -54,17 +54,47 @@ def _load():
     return _libs
 
 
+def _com_init() -> bool:
+    """Inicializa COM (MTA) en el HILO ACTUAL. soundcard/WASAPI exigen COM
+    inicializado en el hilo que enumera o graba; sin ello las llamadas fallan con
+    0x800401F0 (CO_E_NOTINITIALIZED). No basta con el init que hace soundcard al
+    importarse: solo ocurre en el primer hilo que lo importa (p. ej. el efimero
+    que puebla la lista de micros), que ya murio cuando se graba. Por eso cada
+    hilo de trabajo debe inicializar COM por su cuenta (igual que meters.py y
+    streaming.py). MTA (0x0) coincide con el modo de soundcard. Devuelve True si
+    hay que llamar a _com_uninit() al terminar."""
+    try:
+        import ctypes
+        RPC_E_CHANGED_MODE = 0x80010106  # el hilo ya estaba en otro apartamento
+        hr = ctypes.windll.ole32.CoInitializeEx(None, 0x0) & 0xFFFFFFFF
+        return hr != RPC_E_CHANGED_MODE
+    except (AttributeError, OSError):
+        return False
+
+
+def _com_uninit() -> None:
+    try:
+        import ctypes
+        ctypes.windll.ole32.CoUninitialize()
+    except (AttributeError, OSError):
+        pass
+
+
 def list_microphones() -> list[str]:
     """Nombres de microfonos. SOLO desde hilos de trabajo (carga soundcard)."""
     libs = _load()
     if libs is None:
         return []
     _, sc = libs
+    co = _com_init()   # COM por-hilo: enumerar dispositivos WASAPI tambien lo exige
     try:
         return [m.name for m in sc.all_microphones(include_loopback=False)]
     except Exception as exc:  # noqa: BLE001
         logger.warning("No se pudieron listar microfonos: %s", exc)
         return []
+    finally:
+        if co:
+            _com_uninit()
 
 
 def find_microphone(sc, name: str):
@@ -156,6 +186,7 @@ class AudioCapture:
         if libs is None:
             return
         np, sc = libs
+        co = _com_init()   # COM por-hilo: WASAPI lo EXIGE en el hilo que graba
         rec = None
         try:
             device = self._open_device(sc, track.kind)
@@ -186,6 +217,8 @@ class AudioCapture:
                     rec.__exit__(None, None, None)
                 except Exception:  # noqa: BLE001
                     pass
+            if co:
+                _com_uninit()   # tras liberar el recorder (mantiene objetos COM)
 
     def pause(self) -> None:
         self._paused.set()
