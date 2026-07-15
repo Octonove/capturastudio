@@ -576,11 +576,9 @@ class App(tk.Tk):
         from PIL import Image
         try:
             if s.kind == scn.KIND_WINDOW:
-                # PrintWindow: el CONTENIDO de la ventana (area cliente), a prueba
-                # de oclusion e igual que lo que grabara gdigrab. Respaldo: mss.
-                img = winlist.capture_window(s.params.get("title", ""))
-                if img is not None:
-                    return img
+                # Igual que la grabacion (gdigrab de la region del area cliente):
+                # mss de esa misma region -> el preview coincide con lo grabado
+                # (framebuffer, funciona con apps GPU como Chrome).
                 rect = winlist.window_rect(s.params.get("title", ""))
                 if not rect:
                     return None

@@ -252,8 +252,16 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path) -> list[st
                 "-video_size", f"{_even(int(p.get('width', 1920)))}x{_even(int(p.get('height', 1080)))}",
                 "-i", "desktop"]
     if src.kind == scn.KIND_WINDOW:
+        # gdigrab 'title=' hace BitBlt del DC de la ventana: sale NEGRO con apps
+        # aceleradas por GPU (Chrome, Edge, Electron...) y ademas con tamano DPI
+        # erroneo. Se graba la REGION de pantalla del area cliente (framebuffer
+        # de DWM): funciona con cualquier app. La region se resuelve al empezar.
+        from . import winlist
+        rect = winlist.window_rect(src.params.get("title", "")) or (0, 0, 1280, 720)
+        x, y, w, h = rect
         return ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
-                "-thread_queue_size", "1024", "-i", f"title={src.params.get('title', '')}"]
+                "-thread_queue_size", "1024", "-offset_x", str(x), "-offset_y", str(y),
+                "-video_size", f"{_even(w)}x{_even(h)}", "-i", "desktop"]
     if src.kind == scn.KIND_WEBCAM:
         return ["-f", "dshow", "-rtbufsize", "256M", "-thread_queue_size", "1024",
                 "-i", f"video={src.params.get('device', '')}"]
