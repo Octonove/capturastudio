@@ -274,8 +274,25 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path) -> list[st
     return ["-f", "lavfi", "-i", f"color=c=black:s=320x180:r={fps}"]
 
 
-def _base_chain(in_label: str, cw: int, ch: int, bg: str, out: str) -> str:
-    return (f"[{in_label}]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
+def _crop_expr(crop: tuple[int, int, int, int] | None) -> str:
+    """Filtro crop ACOTADO al tamano real de la fuente (con expresiones min()):
+    un recorte mayor que la entrada (p. ej. la ventana se encogio, o desajuste
+    mss/gdigrab) reventaba ffmpeg ('Invalid too big') y se perdia TODA la
+    grabacion. Ahora se acota y nunca aborta. Devuelve 'crop=...,' o ''."""
+    if not crop:
+        return ""
+    cx, cy, cwd, chd = (int(v) for v in crop)
+    if cwd < 2 or chd < 2:
+        return ""
+    return (f"crop=w='min(iw,{cwd})':h='min(ih,{chd})':"
+            f"x='min({max(0, cx)},iw-ow)':y='min({max(0, cy)},ih-oh)',")
+
+
+def _base_chain(in_label: str, cw: int, ch: int, bg: str, out: str,
+                crop: tuple[int, int, int, int] | None = None) -> str:
+    # el recorte de la fuente tambien debe aplicarse a la capa base (una ventana
+    # recortada como unica fuente): antes solo lo hacian las capas superiores.
+    return (f"[{in_label}]{_crop_expr(crop)}scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
             f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color={bg},setsar=1[{out}]")
 
 
@@ -286,10 +303,8 @@ def _layer_chain(src: scn.Source, in_label: str, idx: int, bag: _InputBag,
     tw, th = int(t.w or 0), int(t.h or 0)
     pre = f"[{in_label}]"
     chain = pre
-    # recorte de la fuente
-    if t.crop:
-        cx, cy, cwd, chd = t.crop
-        chain += f"crop={_even(cwd)}:{_even(chd)}:{cx}:{cy},"
+    # recorte de la fuente (acotado a la entrada real: no debe reventar ffmpeg)
+    chain += _crop_expr(t.crop)
     # escalado al tamano de la capa
     if tw > 0 and th > 0:
         chain += f"scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th}"
@@ -331,7 +346,7 @@ def build_scene(scene: scn.Scene, fps: int | None = None, cursor: bool = True,
     # capa base = fuente mas baja, escalada+padded al lienzo
     base = ordered[0]
     bi = bag.add(_source_input(base, fps, cursor, tmp))
-    filters.append(_base_chain(f"{bi}:v", cw, ch, bg, "base"))
+    filters.append(_base_chain(f"{bi}:v", cw, ch, bg, "base", base.transform.crop))
     cur = "base"
 
     for src in ordered[1:]:

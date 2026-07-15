@@ -162,6 +162,13 @@ def screen_source(region: tuple[int, int, int, int], name: str = "Pantalla") -> 
                   transform=Transform(x=0, y=0))
 
 
+def window_source(title: str, name: str = "") -> Source:
+    """Captura de UNA ventana por su titulo (gdigrab -i title=). El recorte para
+    quitar barras/pestanas se guarda en transform.crop."""
+    return Source(kind=KIND_WINDOW, name=name or title,
+                  params={"title": title}, transform=Transform(x=0, y=0))
+
+
 def webcam_source(device: str, x: int, y: int, size: int = 360,
                   circle: bool = True) -> Source:
     return Source(kind=KIND_WEBCAM, name="Webcam",

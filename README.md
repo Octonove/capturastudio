@@ -28,8 +28,11 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
   multidestino y buffer de repetición.
 
 ### Escena y grabación
-- **Fuentes** componibles por capas: pantalla/monitor, ventana, **webcam** (recorte
+- **Fuentes** componibles por capas: pantalla/monitor, **captura de una ventana**
+  (elige la app de una lista de las que tienes abiertas), **webcam** (recorte
   circular o **chroma key**), imagen (con alfa), texto, color y vídeo/media.
+- **Recorte de la fuente**: marca en un clic la zona a grabar (p. ej. solo el
+  contenido de una ventana, sin barras ni pestañas).
 - Editor de **layout** con inspector (posición, tamaño, forma, opacidad) y **vista
   previa de encuadre** en vivo (arrastrar/redimensionar las fuentes con el ratón).
 - **Múltiples escenas** (slots) en un mismo proyecto: crea, duplica, renombra y

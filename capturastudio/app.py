@@ -18,7 +18,8 @@ from . import scene as scn
 from . import ffmpeg_utils as fu
 from . import streaming as stream
 from . import (ai_post, models, content_factory, privacy_shield, bg_removal, meters,
-               autoframe, chapters, quality_check, study, notes, llm, wordedit, cursorzoom)
+               autoframe, chapters, quality_check, study, notes, llm, wordedit, cursorzoom,
+               winlist)
 from .teacher_mode import PolishPanel
 from .config import (AppConfig, load_config, save_config, CANVAS_PRESETS,
                      VIDEO_QUALITY, QUALITY_ORDER, work_dir, get_data_dir, DEFAULT_HOTKEYS)
@@ -373,6 +374,7 @@ class App(tk.Tk):
         for mon in list_monitors():
             mons.add_command(label=mon.label, command=lambda r=mon: self._add_screen(r))
         m.add_cascade(label="Pantalla", menu=mons)
+        m.add_command(label="Ventana de una aplicacion…", command=self._add_window_dialog)
         if self.video_devices:
             cams = tk.Menu(m, tearoff=0)
             for dev in self.video_devices:
@@ -412,6 +414,12 @@ class App(tk.Tk):
         ttk.Checkbutton(parent, text="Croma (quitar fondo verde)", variable=self.var_chroma,
                         command=self._apply_inspector).grid(row=5, column=0, columnspan=2,
                                                             sticky="w", pady=(6, 2))
+        crop_row = ttk.Frame(parent)
+        crop_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.btn_crop = ttk.Button(crop_row, text="✂ Recortar…", command=self._crop_dialog)
+        self.btn_crop.pack(side="left")
+        self.lbl_crop = ttk.Label(crop_row, text="", style="CardMuted.TLabel")
+        self.lbl_crop.pack(side="left", padx=(8, 0))
         parent.columnconfigure(1, weight=1)
         self._set_inspector_enabled(False)
 
@@ -517,6 +525,198 @@ class App(tk.Tk):
         self.scene.add(scn.webcam_source(dev, x=x, y=y, size=340, circle=True))
         self._refresh_source_list(select_last=True)
 
+    def _add_window_dialog(self) -> None:
+        """Elige una de las ventanas abiertas para grabar solo esa aplicacion."""
+        wins = winlist.list_windows(exclude_titles=(self.title(),))
+        if not wins:
+            messagebox.showinfo(APP_NAME, "No se encontraron ventanas de aplicaciones "
+                                          "abiertas. Abre la app que quieras grabar.")
+            return
+        win = tk.Toplevel(self)
+        win.title("Elegir ventana a grabar")
+        win.transient(self)
+        frm = ttk.Frame(win, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Se grabara solo esa ventana (aunque quede detras de otras). "
+                            "Luego puedes recortarla para quitar barras o pestanas.",
+                  style="Muted.TLabel", wraplength=460, justify="left").pack(anchor="w", pady=(0, 8))
+        lb = tk.Listbox(frm, height=min(14, len(wins)), width=64, activestyle="none",
+                        font=(theme.FONT, 10), exportselection=False)
+        for t, r in wins:
+            lb.insert(tk.END, f"{t}   ·   {r[2]}x{r[3]}")
+        lb.selection_set(0)
+        lb.pack(fill="both", expand=True)
+        lb.bind("<Double-Button-1>", lambda e: _ok())
+
+        def _ok():
+            sel = lb.curselection()
+            if not sel:
+                return
+            title = wins[sel[0]][0]
+            if winlist.count_title(title) > 1 and not messagebox.askyesno(
+                    APP_NAME, f"Hay varias ventanas llamadas «{title}». Se grabara "
+                              "la que este mas al frente (Windows no permite elegir "
+                              "otra por el titulo). ¿Continuar?"):
+                return
+            self.scene.add(scn.window_source(title))
+            self._refresh_source_list(select_last=True)
+            win.destroy()
+
+        bar = ttk.Frame(frm)
+        bar.pack(fill="x", pady=(12, 0))
+        ttk.Button(bar, text="Anadir", style="Primary.TButton", command=_ok).pack(side="right")
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="right", padx=(0, 6))
+        theme.center_window(win)
+        win.grab_set()
+
+    # -- recorte de una fuente --------------------------------------------
+    def _grab_source_frame(self, s):
+        """Un fotograma (PIL RGB, sin recortar) de la fuente, para el dialogo de
+        recorte. None si no se puede capturar."""
+        from PIL import Image
+        try:
+            if s.kind == scn.KIND_WINDOW:
+                # PrintWindow: el CONTENIDO de la ventana (area cliente), a prueba
+                # de oclusion e igual que lo que grabara gdigrab. Respaldo: mss.
+                img = winlist.capture_window(s.params.get("title", ""))
+                if img is not None:
+                    return img
+                rect = winlist.window_rect(s.params.get("title", ""))
+                if not rect:
+                    return None
+                region = {"left": rect[0], "top": rect[1], "width": rect[2], "height": rect[3]}
+            elif s.kind == scn.KIND_SCREEN:
+                p = s.params
+                region = {"left": p["left"], "top": p["top"],
+                          "width": p["width"], "height": p["height"]}
+            elif s.kind == scn.KIND_IMAGE:
+                return Image.open(s.params["path"]).convert("RGB")
+            elif s.kind == scn.KIND_MEDIA:
+                return self._first_media_frame(s.params.get("path", ""))
+            else:
+                return None
+            if self._mss is None:
+                import mss
+                self._mss = mss.mss()
+            g = self._mss.grab(region)
+            return Image.frombytes("RGB", g.size, g.bgra, "raw", "BGRX")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("no se pudo capturar fotograma de %s: %s", s.kind, exc)
+            return None
+
+    def _first_media_frame(self, path: str):
+        from PIL import Image
+        if not path or not self.ffmpeg:
+            return None
+        out = str(work_dir() / ".cs_cropframe.png")
+        cmd = [self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+               "-frames:v", "1", out]
+        import subprocess
+        from octonove_core.procutil import subprocess_kwargs
+        try:
+            subprocess.run(cmd, timeout=20, **subprocess_kwargs())
+            return Image.open(out).convert("RGB")
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _crop_dialog(self) -> None:
+        s = self._selected()
+        if not s:
+            return
+        frame = self._grab_source_frame(s)
+        if frame is None:
+            messagebox.showinfo(APP_NAME, "No se pudo capturar la fuente para recortar "
+                                          "(¿la ventana esta minimizada o cerrada?).")
+            return
+        fw, fh = frame.size
+        MAXW, MAXH = 820, 480
+        sc = min(MAXW / fw, MAXH / fh, 1.0)
+        dw, dh = int(fw * sc), int(fh * sc)
+        from PIL import ImageTk
+        disp = frame.resize((dw, dh))
+
+        win = tk.Toplevel(self)
+        win.title(f"Recortar: {s.label()}")
+        win.transient(self)
+        frm = ttk.Frame(win, padding=12)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="Arrastra para marcar la zona que quieres GRABAR "
+                            "(p. ej. solo el contenido, sin barras ni pestanas).",
+                  style="Muted.TLabel", wraplength=dw, justify="left").pack(anchor="w", pady=(0, 6))
+        cv = tk.Canvas(frm, width=dw, height=dh, highlightthickness=1,
+                       highlightbackground=theme.BORDER, cursor="crosshair")
+        cv.pack()
+        imgtk = ImageTk.PhotoImage(disp)
+        cv.create_image(0, 0, anchor="nw", image=imgtk)
+        cv._imgtk = imgtk       # evitar recoleccion
+
+        # rectangulo inicial = recorte actual (en coords de pantalla escaladas) o todo
+        if s.transform.crop:
+            cx, cy, cw2, ch2 = s.transform.crop
+            r0 = (cx * sc, cy * sc, (cx + cw2) * sc, (cy + ch2) * sc)
+        else:
+            r0 = (0, 0, dw, dh)
+        st = {"rect": list(r0), "drawing": False, "id": None, "sh": []}
+
+        def redraw():
+            for h in st["sh"]:
+                cv.delete(h)
+            st["sh"] = []
+            x0, y0, x1, y1 = st["rect"]
+            x0, x1 = sorted((x0, x1)); y0, y1 = sorted((y0, y1))
+            # oscurecer fuera del recorte
+            for a, b, c2, d in ((0, 0, dw, y0), (0, y1, dw, dh), (0, y0, x0, y1), (x1, y0, dw, y1)):
+                if c2 > a and d > b:
+                    st["sh"].append(cv.create_rectangle(a, b, c2, d, fill="#000000",
+                                                        stipple="gray50", outline=""))
+            st["sh"].append(cv.create_rectangle(x0, y0, x1, y1, outline="#38BDF8", width=2))
+
+        def press(e):
+            st["rect"] = [e.x, e.y, e.x, e.y]; st["drawing"] = True; redraw()
+
+        def drag(e):
+            if st["drawing"]:
+                st["rect"][2] = max(0, min(dw, e.x)); st["rect"][3] = max(0, min(dh, e.y)); redraw()
+
+        def release(_e):
+            st["drawing"] = False
+        cv.bind("<ButtonPress-1>", press)
+        cv.bind("<B1-Motion>", drag)
+        cv.bind("<ButtonRelease-1>", release)
+        redraw()
+
+        def aplicar():
+            x0, y0, x1, y1 = st["rect"]
+            x0, x1 = sorted((x0, x1)); y0, y1 = sorted((y0, y1))
+            if x1 - x0 < 8 or y1 - y0 < 8:
+                messagebox.showinfo(APP_NAME, "Marca una zona mas grande para recortar.")
+                return
+            # de coords mostradas a pixeles de la fuente
+            cropx, cropy = int(x0 / sc), int(y0 / sc)
+            cropw, croph = int((x1 - x0) / sc), int((y1 - y0) / sc)
+            # si abarca casi todo el fotograma, es 'sin recorte' (no un crop=todo,
+            # que ademas seria un no-op y arriesgaria desbordes)
+            if cropx <= 2 and cropy <= 2 and cropw >= fw - 4 and croph >= fh - 4:
+                s.transform.crop = None
+            else:
+                s.transform.crop = (cropx, cropy, cropw, croph)
+            self._preview_dirty = True
+            self._load_inspector(s)
+            win.destroy()
+
+        def quitar():
+            s.transform.crop = None
+            self._preview_dirty = True
+            self._load_inspector(s)
+            win.destroy()
+
+        bar = ttk.Frame(frm); bar.pack(fill="x", pady=(10, 0))
+        ttk.Button(bar, text="Aplicar recorte", style="Primary.TButton", command=aplicar).pack(side="right")
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="right", padx=(0, 6))
+        ttk.Button(bar, text="Quitar recorte", command=quitar).pack(side="left")
+        theme.center_window(win)
+        win.grab_set()
+
     def _add_image(self) -> None:
         path = filedialog.askopenfilename(
             title="Elegir imagen", filetypes=[("Imagenes", "*.png *.jpg *.jpeg *.bmp *.webp")])
@@ -614,6 +814,11 @@ class App(tk.Tk):
         self.var_chroma.set(bool(s.transform.chroma))
         self.vis_btn.config(text="Mostrar" if not s.visible else "Ocultar")
         self._set_inspector_enabled(True)
+        # el recorte solo aplica a fuentes de imagen real (pantalla/ventana/foto/video)
+        cropable = s.kind in (scn.KIND_SCREEN, scn.KIND_WINDOW, scn.KIND_IMAGE, scn.KIND_MEDIA)
+        self.btn_crop.config(state="normal" if cropable else "disabled")
+        c = s.transform.crop
+        self.lbl_crop.config(text=(f"recorte {c[2]}×{c[3]}" if c else ("" if cropable else "no aplica")))
         self._loading = False
 
     def _set_inspector_enabled(self, on: bool) -> None:
@@ -694,12 +899,25 @@ class App(tk.Tk):
                     grab = self._mss.grab({"left": p["left"], "top": p["top"],
                                            "width": p["width"], "height": p["height"]})
                     img = Image.frombytes("RGB", grab.size, grab.bgra, "raw", "BGRX")
+                    img = self._crop_img(img, t.crop)
                     img = self._fit(img, cw, ch)
                     ox, oy = (cw - img.width) // 2, (ch - img.height) // 2
                     canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
                     boxes[s.id] = (ox, oy, img.width, img.height)
+                elif s.kind == scn.KIND_WINDOW:
+                    img = self._grab_source_frame(s)   # PrintWindow (=lo que graba gdigrab)
+                    if img is not None:
+                        img = self._crop_img(img.convert("RGB"), t.crop)
+                        img = self._fit(img, cw, ch)
+                        ox, oy = (cw - img.width) // 2, (ch - img.height) // 2
+                        canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
+                        boxes[s.id] = (ox, oy, img.width, img.height)
+                    else:
+                        w, h = self._draw_placeholder(canvas, s)
+                        boxes[s.id] = (t.x, t.y, w, h)
                 elif s.kind == scn.KIND_IMAGE:
                     img = Image.open(s.params["path"]).convert("RGBA")
+                    img = self._crop_img(img, t.crop)   # el recorte tambien en el preview
                     if t.w > 0:
                         img = img.resize((t.w, max(1, int(img.height * t.w / img.width))))
                     canvas.alpha_composite(img, (t.x, t.y))
@@ -750,6 +968,18 @@ class App(tk.Tk):
     def _fit(self, img, cw, ch):
         r = min(cw / img.width, ch / img.height)
         return img.resize((max(1, int(img.width * r)), max(1, int(img.height * r))))
+
+    @staticmethod
+    def _crop_img(img, crop):
+        """Recorta (x,y,w,h) en pixeles de la fuente, acotado a la imagen."""
+        if not crop:
+            return img
+        x, y, w, h = crop
+        x = max(0, min(int(x), img.width - 1))
+        y = max(0, min(int(y), img.height - 1))
+        w = max(1, min(int(w), img.width - x))
+        h = max(1, min(int(h), img.height - y))
+        return img.crop((x, y, x + w, y + h))
 
     def _draw_text_preview(self, canvas, s):
         from PIL import Image
@@ -864,6 +1094,17 @@ class App(tk.Tk):
             messagebox.showerror(APP_NAME, "FFmpeg no disponible."); return
         if not self.scene.visible_sorted():
             messagebox.showwarning(APP_NAME, "Anade al menos una fuente."); return
+        # Una fuente de VENTANA no localizable (minimizada, cerrada o con el titulo
+        # cambiado) haria fallar a gdigrab y, como todas las fuentes van en UN solo
+        # proceso FFmpeg, se perderia TODA la grabacion. Se avisa antes de empezar.
+        faltan = [s.params.get("title", "") for s in self.scene.visible_sorted()
+                  if s.kind == scn.KIND_WINDOW and not winlist.window_rect(s.params.get("title", ""))]
+        if faltan:
+            messagebox.showwarning(APP_NAME, "No se puede grabar: la(s) ventana(s) "
+                                   + ", ".join(f"«{t}»" for t in faltan)
+                                   + " no estan disponibles (¿minimizadas o cerradas?). "
+                                   "Restauralas o quitalas de la escena.")
+            return
         if self._webcam_conflict("rec"):
             return
         self._pause_monitor_for_capture()
