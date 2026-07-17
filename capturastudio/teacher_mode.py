@@ -25,7 +25,7 @@ class PolishPanel(ttk.LabelFrame):
     """Opciones de 'Pulir leccion' (post-produccion) sobre la ultima grabacion."""
 
     def __init__(self, parent, app, profile: str = "docente"):
-        super().__init__(parent, text="✨ Pulir leccion (post-produccion con IA local)", padding=10)
+        super().__init__(parent, text="✨ Pulir leccion (post-produccion con IA local)", padding=8)
         self.app = app
         self.profile = profile if profile in ("docente", "curso") else "docente"
         self.source_video: str | None = None
@@ -48,8 +48,9 @@ class PolishPanel(ttk.LabelFrame):
                                      command=self._polish, state="disabled")
         self.btn_polish.pack(side="right")
 
-        opts = ttk.Frame(self); opts.pack(fill="x", pady=(8, 0))
-        # columna A
+        opts = ttk.Frame(self); opts.pack(fill="x", pady=(6, 0))
+        # columna A (3 filas: se reparten las casillas para que el panel no quede
+        # tan alto que se corte por abajo en Docente/Curso)
         ca = ttk.Frame(opts); ca.grid(row=0, column=0, sticky="nw", padx=(0, 24))
         self.var_silence = tk.BooleanVar(value=True)
         ttk.Checkbutton(ca, text="Quitar pausas y muletillas", variable=self.var_silence).pack(anchor="w")
@@ -57,15 +58,15 @@ class PolishPanel(ttk.LabelFrame):
         ttk.Checkbutton(ca, text="Subtitulos accesibles incrustados", variable=self.var_subs).pack(anchor="w")
         self.var_subs_en = tk.BooleanVar(value=False)
         ttk.Checkbutton(ca, text="     + .srt traducido al ingles", variable=self.var_subs_en).pack(anchor="w")
-        self.var_autoframe = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ca, text="Auto-encuadre: seguirme", variable=self.var_autoframe).pack(anchor="w")
-        # zoom al cursor: opcion de captura que el estudio aplica al grabar
-        self.var_cursorzoom = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ca, text="🔍 Zoom que sigue mi cursor (al grabar)",
-                        variable=self.var_cursorzoom).pack(anchor="w")
 
         # columna B
         cb = ttk.Frame(opts); cb.grid(row=0, column=1, sticky="nw", padx=(0, 24))
+        self.var_autoframe = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cb, text="Auto-encuadre: seguirme", variable=self.var_autoframe).pack(anchor="w")
+        # zoom al cursor: opcion de captura que el estudio aplica al grabar
+        self.var_cursorzoom = tk.BooleanVar(value=False)
+        ttk.Checkbutton(cb, text="🔍 Zoom que sigue mi cursor (al grabar)",
+                        variable=self.var_cursorzoom).pack(anchor="w")
         pr = ttk.Frame(cb); pr.pack(anchor="w")
         self.var_priv = tk.BooleanVar(value=False)
         ttk.Checkbutton(pr, text="Difuminar datos de alumnos", variable=self.var_priv).pack(side="left")

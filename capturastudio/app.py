@@ -371,6 +371,22 @@ class App(tk.Tk):
         self._mode = mode
         for key, btn in getattr(self, "_mode_btns", {}).items():
             btn.configure(style="Primary.TButton" if key == mode else "TButton")
+        self._fit_window_to_content()
+
+    def _fit_window_to_content(self) -> None:
+        """Crece la ventana si el contenido del modo actual no cabe: el panel de
+        'Pulir leccion' (Docente/Curso) es mas alto que la fila 'Directo' y, si la
+        ventana no crece, se cortaba por abajo. Nunca encoge; se acota a la pantalla."""
+        try:
+            self.update_idletasks()
+            need = self.winfo_reqheight()
+            cur = self.winfo_height()
+            maxh = self.winfo_screenheight() - 64   # margen para la barra de tareas
+            newh = min(need, maxh)
+            if newh > cur:
+                self.geometry(f"{self.winfo_width()}x{newh}")
+        except tk.TclError:
+            pass
 
     def _build_add_menu(self, btn: ttk.Menubutton) -> None:
         m = tk.Menu(btn, tearoff=0)
