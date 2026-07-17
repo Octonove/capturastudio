@@ -194,12 +194,15 @@ def circle_mask(w: int, h: int, tmp: Path) -> str:
 
 
 def render_text_png(text: str, size: int, color: str, bg: str | None, tmp: Path,
-                    name_hint: str = "") -> str:
+                    name_hint: str = "", bg_alpha: int = 86) -> str:
     import hashlib
     from PIL import Image, ImageDraw, ImageFont
+    # el dialogo ya acota el tamano, pero una escena .json editada a mano podria
+    # traer un valor enorme -> PNG gigante (MemoryError/DecompressionBomb).
+    size = max(4, min(600, int(size)))
     # Cache por CONTENIDO: si no cambian texto/tamano/color/fondo, no re-renderiza
     # (antes el preview reescribia el PNG a disco ~6 veces/segundo).
-    key = hashlib.md5(f"{text}|{size}|{color}|{bg}".encode("utf-8")).hexdigest()[:12]
+    key = hashlib.md5(f"{text}|{size}|{color}|{bg}|{bg_alpha}".encode("utf-8")).hexdigest()[:12]
     path = tmp / f"_text_{key}.png"
     if path.is_file():
         return str(path)
@@ -220,8 +223,9 @@ def render_text_png(text: str, size: int, color: str, bg: str | None, tmp: Path,
     img = Image.new("RGBA", (tw + pad * 2, th + pad * 2), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     if bg:
+        a = int(max(0, min(100, bg_alpha)) / 100 * 255)   # opacidad del fondo (0-100 -> 0-255)
         d.rounded_rectangle([0, 0, img.width - 1, img.height - 1], radius=pad,
-                            fill=_hex_to_rgba(bg, 220))
+                            fill=_hex_to_rgba(bg, a))
     d.text((pad - bbox[0], pad - bbox[1]), text, fill=_hex_to_rgba(color), font=font)
     img.save(path)
     return str(path)
@@ -277,7 +281,8 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
     if src.kind == scn.KIND_TEXT:
         png = render_text_png(src.params.get("text", ""), int(src.params.get("size", 48)),
                               src.params.get("color", "#FFFFFF"), src.params.get("bg"),
-                              tmp, name_hint=str(src.id))
+                              tmp, name_hint=str(src.id),
+                              bg_alpha=int(src.params.get("bg_alpha", 86)))
         return ["-loop", "1", "-i", png]
     if src.kind == scn.KIND_COLOR:
         # sin tamano fijado, el color cubre el LIENZO (no un 1920x1080 fijo): asi

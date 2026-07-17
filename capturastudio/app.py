@@ -429,6 +429,10 @@ class App(tk.Tk):
         self.btn_crop.pack(side="left")
         self.lbl_crop = ttk.Label(crop_row, text="", style="CardMuted.TLabel")
         self.lbl_crop.pack(side="left", padx=(8, 0))
+        # solo visible para fuentes de texto (se muestra/oculta en _load_inspector)
+        self.btn_text = ttk.Button(parent, text="✎ Editar texto…", command=self._edit_text)
+        self.btn_text.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.btn_text.grid_remove()
         parent.columnconfigure(1, weight=1)
         self._set_inspector_enabled(False)
 
@@ -775,11 +779,111 @@ class App(tk.Tk):
             self.scene.add(scn.image_source(path, x=40, y=40, w=320))
             self._refresh_source_list(select_last=True)
 
+    def _text_dialog(self, existing=None):
+        """Crear/editar una fuente de texto: contenido, tamano, color del texto,
+        y fondo (con su propio color y una opacidad INDEPENDIENTE de la de la
+        capa, para poder tener texto opaco sobre un fondo tenue)."""
+        p = existing.params if existing else {}
+        cur = {"color": p.get("color", "#FFFFFF"), "bg": p.get("bg") or "#1E3A5F"}
+        win = tk.Toplevel(self)
+        win.title("Editar texto" if existing else "Nuevo texto")
+        win.transient(self)
+        win.resizable(False, False)
+        frm = ttk.Frame(win, padding=16)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Texto:").grid(row=0, column=0, sticky="w", pady=4)
+        var_text = tk.StringVar(value=p.get("text", "Texto de prueba"))
+        ent = ttk.Entry(frm, textvariable=var_text, width=34)
+        ent.grid(row=0, column=1, columnspan=2, sticky="ew", pady=4)
+
+        ttk.Label(frm, text="Tamaño:").grid(row=1, column=0, sticky="w", pady=4)
+        var_size = tk.IntVar(value=int(p.get("size", 48)))
+        ttk.Spinbox(frm, from_=8, to=400, increment=2, textvariable=var_size,
+                    width=8).grid(row=1, column=1, sticky="w", pady=4)
+
+        ttk.Label(frm, text="Color del texto:").grid(row=2, column=0, sticky="w", pady=4)
+        sw_text = tk.Label(frm, width=4, bg=cur["color"], relief="solid", bd=1)
+        sw_text.grid(row=2, column=1, sticky="w", padx=6)
+
+        def pick_text():
+            _, hx = colorchooser.askcolor(color=cur["color"], parent=win, title="Color del texto")
+            if hx:
+                cur["color"] = hx
+                sw_text.config(bg=hx)
+        ttk.Button(frm, text="Elegir…", command=pick_text).grid(row=2, column=2, sticky="w")
+
+        var_bg = tk.BooleanVar(value=(p.get("bg") is not None) if existing else True)
+        ttk.Checkbutton(frm, text="Fondo detrás del texto", variable=var_bg,
+                        command=lambda: _sync()).grid(row=3, column=0, columnspan=3,
+                                                      sticky="w", pady=(10, 2))
+
+        ttk.Label(frm, text="Color del fondo:").grid(row=4, column=0, sticky="w", pady=4)
+        sw_bg = tk.Label(frm, width=4, bg=cur["bg"], relief="solid", bd=1)
+        sw_bg.grid(row=4, column=1, sticky="w", padx=6)
+
+        def pick_bg():
+            _, hx = colorchooser.askcolor(color=cur["bg"], parent=win, title="Color del fondo")
+            if hx:
+                cur["bg"] = hx
+                sw_bg.config(bg=hx)
+        btn_bg = ttk.Button(frm, text="Elegir…", command=pick_bg)
+        btn_bg.grid(row=4, column=2, sticky="w")
+
+        ttk.Label(frm, text="Opacidad del fondo %:").grid(row=5, column=0, sticky="w", pady=4)
+        var_alpha = tk.DoubleVar(value=float(p.get("bg_alpha", 86)))
+        sc_alpha = ttk.Scale(frm, from_=0, to=100, variable=var_alpha, orient="horizontal")
+        sc_alpha.grid(row=5, column=1, columnspan=2, sticky="ew")
+
+        def _sync():
+            st = "normal" if var_bg.get() else "disabled"
+            btn_bg.config(state=st)
+            sc_alpha.config(state=st)
+        _sync()
+
+        out = {}
+
+        def ok():
+            t = var_text.get().strip()
+            if not t:
+                messagebox.showinfo(APP_NAME, "Escribe algún texto.", parent=win)
+                return
+            # _ival tolera el campo vacio/no numerico (un Spinbox lo permite) sin
+            # reventar int() al Aceptar; se acota a un rango razonable.
+            out.update({"text": t, "size": self._ival(var_size, 8, 400, 48),
+                        "color": cur["color"],
+                        "bg": cur["bg"] if var_bg.get() else None,
+                        "bg_alpha": max(0, min(100, int(round(var_alpha.get()))))})
+            win.destroy()
+        btns = ttk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=3, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="Cancelar", command=win.destroy).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Aceptar", command=ok).pack(side="right")
+        frm.columnconfigure(1, weight=1)
+        ent.focus_set()
+        ent.selection_range(0, "end")
+        win.grab_set()
+        self.wait_window(win)
+        return out or None
+
     def _add_text(self) -> None:
-        txt = simpledialog.askstring("Texto", "Texto a mostrar:", parent=self)
-        if txt:
-            self.scene.add(scn.text_source(txt, x=60, y=self.scene.canvas_h - 140, size=48))
+        params = self._text_dialog()
+        if params:
+            self.scene.add(scn.text_source(
+                params["text"], x=60, y=self.scene.canvas_h - 140,
+                size=params["size"], color=params["color"],
+                bg=params["bg"], bg_alpha=params["bg_alpha"]))
             self._refresh_source_list(select_last=True)
+
+    def _edit_text(self) -> None:
+        s = self._selected()
+        if not s or s.kind != scn.KIND_TEXT:
+            return
+        params = self._text_dialog(s)
+        if params:
+            s.params.update(params)
+            self._preview_dirty = True
+            self._load_inspector(s)
 
     def _add_color(self) -> None:
         rgb, hx = colorchooser.askcolor(color="#1E3A5F", parent=self)
@@ -802,6 +906,7 @@ class App(tk.Tk):
             self._sel_id = None
             self._refresh_source_list()
             self._set_inspector_enabled(False)
+            self.btn_text.grid_remove()
 
     def _reorder(self, direction: int) -> None:
         if self._sel_id is None:
@@ -855,6 +960,7 @@ class App(tk.Tk):
     def _load_inspector(self, s: scn.Source | None) -> None:
         if not s:
             self._set_inspector_enabled(False)
+            self.btn_text.grid_remove()   # no dejar el boton de texto en gris sin seleccion
             return
         self._loading = True
         try:
@@ -872,6 +978,11 @@ class App(tk.Tk):
             self.btn_crop.config(state="normal" if cropable else "disabled")
             c = s.transform.crop
             self.lbl_crop.config(text=(f"recorte {c[2]}×{c[3]}" if c else ("" if cropable else "no aplica")))
+            if s.kind == scn.KIND_TEXT:
+                self.btn_text.grid()
+                self.btn_text.config(state="normal")
+            else:
+                self.btn_text.grid_remove()
         finally:
             # sin el finally, un fallo aqui dejaba _loading en True para siempre
             # y el inspector no volvia a aplicar nada (en silencio).
@@ -1005,7 +1116,8 @@ class App(tk.Tk):
                     img = Image.open(fu.render_text_png(
                         s.params.get("text", ""), int(s.params.get("size", 48)),
                         s.params.get("color", "#FFFFFF"), s.params.get("bg"),
-                        work_dir(), name_hint=str(s.id))).convert("RGBA")
+                        work_dir(), name_hint=str(s.id),
+                        bg_alpha=int(s.params.get("bg_alpha", 86)))).convert("RGBA")
                 if img is None:                     # webcam/media/ventana no disponible
                     w, h = self._draw_placeholder(canvas, s, cw, ch)
                     boxes[s.id] = ((0, 0) if fu.fills_canvas(s) else (t.x, t.y)) + (w, h)

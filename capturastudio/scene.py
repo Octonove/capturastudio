@@ -183,9 +183,13 @@ def image_source(path: str, x: int = 40, y: int = 40, w: int = 0) -> Source:
 
 
 def text_source(text: str, x: int = 60, y: int = 60, size: int = 48,
-                color: str = "#FFFFFF", bg: str | None = "#1E3A5F") -> Source:
+                color: str = "#FFFFFF", bg: str | None = "#1E3A5F",
+                bg_alpha: int = 86) -> Source:
+    # bg_alpha (0-100): opacidad del recuadro de fondo, independiente de la
+    # opacidad de la capa, para poder tener texto opaco sobre un fondo tenue.
     return Source(kind=KIND_TEXT, name="Texto",
-                  params={"text": text, "size": size, "color": color, "bg": bg},
+                  params={"text": text, "size": size, "color": color, "bg": bg,
+                          "bg_alpha": int(bg_alpha)},
                   transform=Transform(x=x, y=y))
 
 
