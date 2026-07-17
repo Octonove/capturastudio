@@ -32,14 +32,19 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
   (elige la app de una lista de las que tienes abiertas), **webcam** (recorte
   circular o **chroma key**), imagen (con alfa), texto, color y vídeo/media.
 - **Captura de ventana tipo OBS** (Windows Graphics Capture): graba solo esa
-  ventana **aunque la tapes con otra** y **la sigue** si la mueves, también con
-  apps aceleradas por GPU (navegadores). Funciona igual en **grabación, streaming
-  en directo y replay**. En equipos antiguos cae automáticamente a la captura por
-  región.
+  ventana **aunque la tapes con otra** y **la sigue** si la mueves o **cambia de
+  título** (navegadores que cambian de pestaña), también con apps aceleradas por
+  GPU. Funciona igual en **grabación, streaming en directo y replay**, y el vídeo
+  **mantiene la velocidad real** aunque el PC no llegue a los FPS pedidos. En
+  equipos antiguos cae automáticamente a la captura por región.
+- **Texto personalizable**: color del texto, **fondo** activable con su propio
+  color y **opacidad de fondo independiente** (texto opaco sobre fondo tenue), y
+  edición del texto/tamaño después de crearlo.
 - **Recorte de la fuente**: marca en un clic la zona a grabar (p. ej. solo el
   contenido de una ventana, sin barras ni pestañas).
-- Editor de **layout** con inspector (posición, tamaño, forma, opacidad) y **vista
-  previa de encuadre** en vivo (arrastrar/redimensionar las fuentes con el ratón).
+- Editor de **layout** con inspector (posición, **tamaño ancho y alto**, forma,
+  opacidad) y **vista previa de encuadre** en vivo fiel a lo que se graba
+  (arrastrar/redimensionar las fuentes con el ratón).
 - **Múltiples escenas** (slots) en un mismo proyecto: crea, duplica, renombra y
   **conmuta** entre ellas; el proyecto entero se guarda/carga en un `.json`.
 - Grabación a **calidad nativa** (NVENC / AMF / QSV / x264, CRF/CQ), **pausa y
