@@ -24,7 +24,9 @@ try:
     _gdi = ctypes.windll.gdi32
     _dwm = ctypes.windll.dwmapi
     _u.IsWindowVisible.argtypes = [wintypes.HWND]
+    _u.IsWindow.argtypes = [wintypes.HWND]
     _u.IsIconic.argtypes = [wintypes.HWND]
+    _u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     _u.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     _u.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     _u.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
@@ -146,6 +148,52 @@ def hwnd_for(title: str):
     la captura WGC (wincap) apunte a la MISMA ventana que ve el resto de la app."""
     h = _hwnd_for(title)
     return int(h) if h else None
+
+
+def hwnd_alive(hwnd) -> bool:
+    """True si ese HWND sigue siendo una ventana usable (existe, visible y no
+    minimizada). Permite SEGUIR a una ventana por su identificador aunque cambie
+    de titulo (p. ej. un navegador al cambiar de pestana)."""
+    if not _WIN or not hwnd:
+        return False
+    try:
+        h = wintypes.HWND(int(hwnd))
+        return bool(_u.IsWindow(h) and _u.IsWindowVisible(h) and not _u.IsIconic(h)
+                    and not _is_cloaked(h))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pid_of(hwnd) -> int:
+    """PID del proceso dueno de la ventana (0 si no se puede). Sirve para no
+    confundir un HWND que Windows haya RECICLADO para otra ventana distinta."""
+    if not _WIN or not hwnd:
+        return 0
+    try:
+        p = wintypes.DWORD(0)
+        _u.GetWindowThreadProcessId(wintypes.HWND(int(hwnd)), ctypes.byref(p))
+        return int(p.value)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def resolve_window(params: dict):
+    """HWND actual de una fuente de ventana. Prefiere el HWND ya guardado si sigue
+    vivo Y sigue siendo del MISMO proceso (asi un cambio de TITULO no pierde la
+    ventana, pero un HWND reciclado por otra ventana no la sustituye en silencio);
+    si no, lo busca por titulo. None si no se encuentra."""
+    h = params.get("hwnd")
+    if h and hwnd_alive(h):
+        pid = params.get("pid")
+        if not pid or pid_of(h) == pid:
+            return int(h)
+    return hwnd_for(params.get("title", ""))
+
+
+def client_rect(hwnd) -> tuple[int, int, int, int] | None:
+    """(x, y, w, h) del area cliente en pantalla de ese HWND (para el respaldo
+    gdigrab/mss). None si no vale."""
+    return _client_screen_rect(wintypes.HWND(int(hwnd))) if (_WIN and hwnd) else None
 
 
 def count_title(title: str) -> int:

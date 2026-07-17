@@ -571,7 +571,11 @@ class App(tk.Tk):
                               "la que este mas al frente (Windows no permite elegir "
                               "otra por el titulo). ¿Continuar?"):
                 return
-            self.scene.add(scn.window_source(title))
+            # se guarda tambien el HWND (+PID) para SEGUIR la ventana aunque
+            # cambie de titulo (navegadores, etc.).
+            hwnd = winlist.hwnd_for(title)
+            self.scene.add(scn.window_source(title, hwnd=hwnd,
+                                             pid=winlist.pid_of(hwnd) if hwnd else None))
             self._refresh_source_list(select_last=True)
             win.destroy()
 
@@ -583,16 +587,26 @@ class App(tk.Tk):
         win.grab_set()
 
     # -- captura WGC de ventanas (preview / recorte) ----------------------
-    def _wgc_frame(self, title: str):
-        """Ultimo fotograma WGC (PIL RGB) de la ventana, o None si WGC no esta
-        disponible o falla. Mantiene una sesion persistente por titulo (a prueba
-        de oclusion y en el MISMO espacio que grabara el motor)."""
-        if not title or not wincap.available():
+    def _wgc_frame(self, s):
+        """Ultimo fotograma WGC (PIL RGB) de la ventana de la fuente s, o None si
+        WGC no esta disponible o falla. SIGUE la ventana por HWND (aunque cambie
+        de titulo) y mantiene una sesion persistente por fuente."""
+        if not wincap.available():
             return None
-        hwnd = winlist.hwnd_for(title)
+        hwnd = winlist.resolve_window(s.params)
         if not hwnd:
+            # la ventana no esta (minimizada/cerrada): suelta el grabber viejo
+            gr = self._win_grabbers.pop(s.id, None)
+            if gr is not None:
+                try:
+                    gr.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             return None
-        gr = self._win_grabbers.get(title)
+        # mantener fresco en la sesion (sobrevive cambios de titulo)
+        s.params["hwnd"] = hwnd
+        s.params["pid"] = winlist.pid_of(hwnd)
+        gr = self._win_grabbers.get(s.id)
         if gr is None or not gr.alive or gr.hwnd != hwnd:
             if gr is not None:
                 try:
@@ -605,20 +619,19 @@ class App(tk.Tk):
             except Exception:  # noqa: BLE001
                 ok = False
             if not ok:
-                self._win_grabbers.pop(title, None)
+                self._win_grabbers.pop(s.id, None)
                 return None
-            self._win_grabbers[title] = gr
+            self._win_grabbers[s.id] = gr
         return gr.frame()
 
     def _prune_grabbers(self) -> None:
-        """Cierra sesiones WGC de ventanas que ya no son fuentes visibles."""
+        """Cierra sesiones WGC de fuentes de ventana que ya no estan visibles."""
         if not self._win_grabbers:
             return
-        active = {s.params.get("title", "") for s in self.scene.visible_sorted()
-                  if s.kind == scn.KIND_WINDOW}
-        for title in [t for t in self._win_grabbers if t not in active]:
+        active = {s.id for s in self.scene.visible_sorted() if s.kind == scn.KIND_WINDOW}
+        for sid in [k for k in self._win_grabbers if k not in active]:
             try:
-                self._win_grabbers.pop(title).stop()
+                self._win_grabbers.pop(sid).stop()
             except Exception:  # noqa: BLE001
                 pass
 
@@ -631,12 +644,13 @@ class App(tk.Tk):
             if s.kind == scn.KIND_WINDOW:
                 # 1a opcion: WGC (a prueba de oclusion), la MISMA superficie de
                 # ventana que graba el motor -> el recorte coincide al pixel.
-                img = self._wgc_frame(s.params.get("title", ""))
+                img = self._wgc_frame(s)
                 if img is not None:
                     return img
-                # Respaldo (WGC no disponible): mss de la region del area cliente,
-                # que es lo que grabara gdigrab en ese caso.
-                rect = winlist.window_rect(s.params.get("title", ""))
+                # Respaldo (WGC no disponible): mss del area cliente de la MISMA
+                # ventana (por HWND, aunque haya cambiado de titulo).
+                hwnd = winlist.resolve_window(s.params)
+                rect = winlist.client_rect(hwnd) if hwnd else None
                 if not rect:
                     return None
                 region = {"left": rect[0], "top": rect[1], "width": rect[2], "height": rect[3]}
@@ -1338,8 +1352,12 @@ class App(tk.Tk):
         # Una fuente de VENTANA no localizable (minimizada, cerrada o con el titulo
         # cambiado) haria fallar a gdigrab y, como todas las fuentes van en UN solo
         # proceso FFmpeg, se perderia TODA la grabacion. Se avisa antes de empezar.
+        # se valida CAPTURABILIDAD (area cliente real), no mera existencia:
+        # client_rect devuelve None para ventanas minimizadas -> asi SI se avisa
+        # (antes una minimizada pasaba y acababa grabando la esquina del escritorio).
         faltan = [s.params.get("title", "") for s in self.scene.visible_sorted()
-                  if s.kind == scn.KIND_WINDOW and not winlist.window_rect(s.params.get("title", ""))]
+                  if s.kind == scn.KIND_WINDOW
+                  and not winlist.client_rect(winlist.resolve_window(s.params))]
         if faltan:
             messagebox.showwarning(APP_NAME, "No se puede grabar: la(s) ventana(s) "
                                    + ", ".join(f"«{t}»" for t in faltan)

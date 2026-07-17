@@ -104,14 +104,19 @@ class Scene:
                 s.z = k
 
     def to_dict(self) -> dict:
+        def _src(s):
+            d = {k: v for k, v in asdict(s).items() if k != "transform"}
+            # HWND/PID son de la SESION actual (Windows los reasigna): no se
+            # persisten, para no seguir a una ventana equivocada al recargar.
+            if isinstance(d.get("params"), dict):
+                d["params"] = {k: v for k, v in d["params"].items()
+                               if k not in ("hwnd", "pid")}
+            d["transform"] = asdict(s.transform)
+            return d
         return {
             "name": self.name, "canvas_w": self.canvas_w, "canvas_h": self.canvas_h,
             "fps": self.fps, "bg_color": self.bg_color,
-            "sources": [
-                {**{k: v for k, v in asdict(s).items() if k != "transform"},
-                 "transform": asdict(s.transform)}
-                for s in self.sources
-            ],
+            "sources": [_src(s) for s in self.sources],
         }
 
     @classmethod
@@ -162,11 +167,18 @@ def screen_source(region: tuple[int, int, int, int], name: str = "Pantalla") -> 
                   transform=Transform(x=0, y=0))
 
 
-def window_source(title: str, name: str = "") -> Source:
-    """Captura de UNA ventana por su titulo (gdigrab -i title=). El recorte para
-    quitar barras/pestanas se guarda en transform.crop."""
+def window_source(title: str, name: str = "", hwnd: int | None = None,
+                  pid: int | None = None) -> Source:
+    """Captura de UNA ventana. Se identifica por titulo, pero tambien se guarda su
+    HWND (+PID) para SEGUIRLA aunque cambie de titulo (p. ej. un navegador al
+    cambiar de pestana). HWND/PID son de sesion (no se persisten)."""
+    params = {"title": title}
+    if hwnd:
+        params["hwnd"] = int(hwnd)
+    if pid:
+        params["pid"] = int(pid)
     return Source(kind=KIND_WINDOW, name=name or title,
-                  params={"title": title}, transform=Transform(x=0, y=0))
+                  params=params, transform=Transform(x=0, y=0))
 
 
 def webcam_source(device: str, x: int, y: int, size: int = 360,

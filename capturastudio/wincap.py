@@ -288,7 +288,12 @@ class WindowPump:
 
     def ffmpeg_input(self) -> list[str]:
         w, h = self._sess.w, self._sess.h
-        return ["-f", "rawvideo", "-pixel_format", "bgra", "-video_size", f"{w}x{h}",
+        # -use_wallclock_as_timestamps: cada frame que llega por el pipe se sella
+        # con la HORA REAL. Sin esto, si el pump no sostiene los fps pedidos
+        # (frames de 32MB por el pipe), FFmpeg los numera a 60fps y el video sale
+        # mas corto -> ACELERADO. Con el flag, la duracion = tiempo real grabado.
+        return ["-use_wallclock_as_timestamps", "1",
+                "-f", "rawvideo", "-pixel_format", "bgra", "-video_size", f"{w}x{h}",
                 "-framerate", str(self.fps), "-thread_queue_size", "64", "-i", self.pipe_path]
 
     def _pump(self) -> None:
@@ -400,7 +405,7 @@ class WindowPumpSet:
         for src in scene.visible_sorted():
             if src.kind != scn.KIND_WINDOW:
                 continue
-            hwnd = winlist.hwnd_for(src.params.get("title", ""))
+            hwnd = winlist.resolve_window(src.params)   # por HWND (sigue a la ventana)
             if not hwnd:
                 continue
             pump = WindowPump(hwnd, fps, name=str(src.id), cursor=cursor)

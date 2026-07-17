@@ -250,9 +250,15 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
                   window_pipes: dict | None = None,
                   canvas: tuple[int, int] | None = None) -> list[str]:
     t = src.transform
+    # -use_wallclock_as_timestamps: sella cada frame capturado con la HORA REAL.
+    # Sin esto, si el PC no llega a los fps pedidos, FFmpeg numera los frames a la
+    # tasa fija y el video sale mas corto -> se reproduce ACELERADO. Con el flag,
+    # la duracion del video siempre coincide con el tiempo grabado.
+    _WC = ["-use_wallclock_as_timestamps", "1"]
     if src.kind == scn.KIND_SCREEN:
         p = src.params
-        return ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
+        return [*_WC,
+                "-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
                 "-thread_queue_size", "1024", "-offset_x", str(p.get("left", 0)),
                 "-offset_y", str(p.get("top", 0)),
                 "-video_size", f"{_even(int(p.get('width', 1920)))}x{_even(int(p.get('height', 1080)))}",
@@ -268,13 +274,17 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
         # region captura el framebuffer de DWM (funciona con cualquier app) pero
         # NO es a prueba de oclusion. Se resuelve al empezar.
         from . import winlist
-        rect = winlist.window_rect(src.params.get("title", "")) or (0, 0, 1280, 720)
+        hwnd = winlist.resolve_window(src.params)   # por HWND (sigue a la ventana)
+        rect = (winlist.client_rect(hwnd) if hwnd else None) or (0, 0, 1280, 720)
         x, y, w, h = rect
-        return ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
+        return [*_WC,
+                "-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
                 "-thread_queue_size", "1024", "-offset_x", str(x), "-offset_y", str(y),
                 "-video_size", f"{_even(w)}x{_even(h)}", "-i", "desktop"]
     if src.kind == scn.KIND_WEBCAM:
-        return ["-f", "dshow", "-rtbufsize", "256M", "-thread_queue_size", "1024",
+        # mismo sello de reloj real que pantalla/ventana: asi todas las fuentes en
+        # vivo comparten base temporal y no derivan entre si en tomas largas.
+        return [*_WC, "-f", "dshow", "-rtbufsize", "256M", "-thread_queue_size", "1024",
                 "-i", f"video={src.params.get('device', '')}"]
     if src.kind == scn.KIND_IMAGE:
         return ["-loop", "1", "-i", src.params.get("path", "")]
