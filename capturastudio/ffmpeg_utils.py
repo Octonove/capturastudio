@@ -243,7 +243,8 @@ class _InputBag:
 
 
 def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
-                  window_pipes: dict | None = None) -> list[str]:
+                  window_pipes: dict | None = None,
+                  canvas: tuple[int, int] | None = None) -> list[str]:
     t = src.transform
     if src.kind == scn.KIND_SCREEN:
         p = src.params
@@ -279,10 +280,15 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
                               tmp, name_hint=str(src.id))
         return ["-loop", "1", "-i", png]
     if src.kind == scn.KIND_COLOR:
-        w = t.w or 1920
-        h = t.h or 1080
+        # sin tamano fijado, el color cubre el LIENZO (no un 1920x1080 fijo): asi
+        # coincide con lo que pinta la vista previa en cualquier resolucion.
+        # max(2,...): un tamano invalido (negativo) generaba «s=-100x200», que
+        # aborta FFmpeg y hacia perder la grabacion entera.
+        cw, ch = canvas or (1920, 1080)
+        w = max(2, _even(t.w or cw))
+        h = max(2, _even(t.h or ch))
         col = safe_color(src.params.get("color", "#1E3A5F"), "0x1E3A5F")
-        return ["-f", "lavfi", "-i", f"color=c={col}:s={_even(w)}x{_even(h)}:r={fps}"]
+        return ["-f", "lavfi", "-i", f"color=c={col}:s={w}x{h}:r={fps}"]
     if src.kind == scn.KIND_MEDIA:
         return ["-stream_loop", "-1", "-i", src.params.get("path", "")]
     return ["-f", "lavfi", "-i", f"color=c=black:s=320x180:r={fps}"]
@@ -302,6 +308,23 @@ def _crop_expr(crop: tuple[int, int, int, int] | None) -> str:
             f"x='min({max(0, cx)},iw-ow)':y='min({max(0, cy)},ih-oh)',")
 
 
+def fills_canvas(src: scn.Source) -> bool:
+    """True si la fuente debe ENCAJARSE en el lienzo (centrada) en vez de tratarse
+    como una capa colocada en x/y.
+
+    Solo las capturas y los medios SIN tamano fijado: es el comportamiento de
+    siempre para un fondo (pantalla, ventana, webcam, video, foto). Un «Color /
+    Fondo» o un texto NUNCA entran aqui: antes, por ser la capa mas baja, se
+    estiraban al lienzo ignorando su tamano y su forma (de ahi que el color
+    saliera a pantalla completa y el circulo no hiciera nada).
+
+    La vista previa usa esta MISMA funcion, para que ambos coincidan."""
+    t = src.transform
+    return (src.kind in (scn.KIND_SCREEN, scn.KIND_WINDOW, scn.KIND_WEBCAM,
+                         scn.KIND_MEDIA, scn.KIND_IMAGE)
+            and not t.w and not t.h)
+
+
 def _base_chain(in_label: str, cw: int, ch: int, bg: str, out: str,
                 crop: tuple[int, int, int, int] | None = None) -> str:
     # el recorte de la fuente tambien debe aplicarse a la capa base (una ventana
@@ -314,16 +337,27 @@ def _layer_chain(src: scn.Source, in_label: str, idx: int, bag: _InputBag,
                  tmp: Path) -> tuple[str, str]:
     """Devuelve (cadena de filtros, etiqueta de salida) para una capa."""
     t = src.transform
-    tw, th = int(t.w or 0), int(t.h or 0)
+    # max(0,...): una escena .json editada a mano podria traer tamanos negativos
+    tw, th = max(0, int(t.w or 0)), max(0, int(t.h or 0))
     pre = f"[{in_label}]"
     chain = pre
     # recorte de la fuente (acotado a la entrada real: no debe reventar ffmpeg)
     chain += _crop_expr(t.crop)
-    # escalado al tamano de la capa
+    # escalado al tamano de la capa (la vista previa replica esta misma
+    # semantica en App._fit_preview: si cambia una, cambiar la otra).
     if tw > 0 and th > 0:
-        chain += f"scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th}"
+        if src.kind == scn.KIND_TEXT:
+            # El texto se ajusta DENTRO de la caja y se centra con relleno
+            # transparente: forzarlo a la caja (increase+crop) le cortaba las
+            # letras. El pad deja el tamano exacto (lo exige la mascara circular).
+            chain += (f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                      f"format=rgba,pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=0x00000000")
+        else:
+            chain += f"scale={tw}:{th}:force_original_aspect_ratio=increase,crop={tw}:{th}"
     elif tw > 0:
         chain += f"scale={tw}:-2"
+    elif th > 0:
+        chain += f"scale=-2:{th}"     # solo alto: antes se ignoraba y no escalaba
     else:
         chain += "null"
     out = f"L{idx}"
@@ -332,8 +366,15 @@ def _layer_chain(src: scn.Source, in_label: str, idx: int, bag: _InputBag,
         # Chroma key (quitar fondo de color, p.ej. pantalla verde) por fuente.
         chain += f",format=rgba,chromakey={chroma}:0.30:0.08"
     if t.shape == "circle" and tw > 0 and th > 0 and not chroma:
+        # La mascara MULTIPLICA el alfa que ya trae la fuente. Con alphamerge a
+        # secas el alfa se REEMPLAZA, y lo transparente pasaba a opaco: un texto
+        # con circulo salia como un disco negro (y un PNG con alfa, relleno).
         mask = bag.add(["-loop", "1", "-i", circle_mask(tw, th, tmp)])
-        chain += f",format=rgba[pre{idx}];[{mask}:v]format=gray,scale={tw}:{th}[mk{idx}];[pre{idx}][mk{idx}]alphamerge[{out}]"
+        chain += (f",format=rgba,split[pa{idx}][pb{idx}];"
+                  f"[{mask}:v]format=gray,scale={tw}:{th}[mk{idx}];"
+                  f"[pa{idx}]alphaextract[al{idx}];"
+                  f"[al{idx}][mk{idx}]blend=all_mode=multiply[am{idx}];"
+                  f"[pb{idx}][am{idx}]alphamerge[{out}]")
     elif t.opacity < 1.0:
         chain += f",format=rgba,colorchannelmixer=aa={max(0.0, min(1.0, t.opacity)):.3f}[{out}]"
     else:
@@ -354,24 +395,27 @@ def build_scene(scene: scn.Scene, fps: int | None = None, cursor: bool = True,
     ordered = scene.visible_sorted()
     bag = _InputBag()
 
-    if not ordered:
-        # lienzo vacio (color) para no fallar
-        bag.add(["-f", "lavfi", "-i", f"color=c={bg}:s={cw}x{ch}:r={fps}"])
-        return bag.args, f"[0:v]null[vout]", "[vout]"
-
-    filters: list[str] = []
-    # capa base = fuente mas baja, escalada+padded al lienzo
-    base = ordered[0]
-    bi = bag.add(_source_input(base, fps, cursor, tmp, window_pipes))
-    filters.append(_base_chain(f"{bi}:v", cw, ch, bg, "base", base.transform.crop))
+    # Lienzo de fondo SINTETICO. Antes la capa mas baja se estiraba al lienzo
+    # fuera cual fuera su tipo, ignorando su posicion, tamano, forma y opacidad:
+    # por eso un «Color / Fondo» puesto al fondo salia a pantalla completa y sin
+    # circulo. Ahora TODAS las fuentes son capas con la misma semantica, y solo
+    # las capturas/medios sin tamano (fills_canvas) se encajan en el lienzo.
+    bi = bag.add(["-f", "lavfi", "-i", f"color=c={bg}:s={cw}x{ch}:r={fps}"])
+    filters: list[str] = [f"[{bi}:v]null[base]"]
     cur = "base"
 
-    for src in ordered[1:]:
-        si = bag.add(_source_input(src, fps, cursor, tmp, window_pipes))
-        chain, lbl = _layer_chain(src, f"{si}:v", si, bag, tmp)
-        filters.append(chain)
+    for src in ordered:
+        si = bag.add(_source_input(src, fps, cursor, tmp, window_pipes, (cw, ch)))
+        if fills_canvas(src):
+            lbl = f"L{si}"
+            filters.append(_base_chain(f"{si}:v", cw, ch, bg, lbl, src.transform.crop))
+            ox, oy = 0, 0
+        else:
+            chain, lbl = _layer_chain(src, f"{si}:v", si, bag, tmp)
+            filters.append(chain)
+            ox, oy = src.transform.x, src.transform.y
         nxt = f"o{si}"
-        filters.append(f"[{cur}][{lbl}]overlay={src.transform.x}:{src.transform.y}:format=auto[{nxt}]")
+        filters.append(f"[{cur}][{lbl}]overlay={ox}:{oy}:format=auto[{nxt}]")
         cur = nxt
 
     filters.append(f"[{cur}]null[vout]")

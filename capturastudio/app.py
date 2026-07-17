@@ -394,32 +394,37 @@ class App(tk.Tk):
         self.var_x = tk.IntVar(value=0)
         self.var_y = tk.IntVar(value=0)
         self.var_w = tk.IntVar(value=0)
+        self.var_h = tk.IntVar(value=0)
         self.var_op = tk.IntVar(value=100)
         self.var_shape = tk.StringVar(value="rect")
-        rows = [("X", self.var_x), ("Y", self.var_y), ("Ancho (0=auto)", self.var_w)]
-        for i, (lab, var) in enumerate(rows):
+        # X/Y admiten negativos (sacar la fuente del lienzo), pero ancho y alto
+        # NO: un tamano negativo llega a FFmpeg como «s=-100x200» y aborta la
+        # grabacion entera (se perderia la toma).
+        rows = [("X", self.var_x, -8000), ("Y", self.var_y, -8000),
+                ("Ancho (0=auto)", self.var_w, 0), ("Alto (0=auto)", self.var_h, 0)]
+        for i, (lab, var, minimo) in enumerate(rows):
             ttk.Label(parent, text=lab, style="CardMuted.TLabel").grid(row=i, column=0, sticky="w", pady=3)
-            sp = ttk.Spinbox(parent, from_=-8000, to=8000, increment=10, textvariable=var,
+            sp = ttk.Spinbox(parent, from_=minimo, to=8000, increment=10, textvariable=var,
                              width=10, command=self._apply_inspector)
             sp.grid(row=i, column=1, sticky="e", pady=3)
             sp.bind("<Return>", lambda e: self._apply_inspector())
             sp.bind("<FocusOut>", lambda e: self._apply_inspector())
-        ttk.Label(parent, text="Forma", style="CardMuted.TLabel").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Label(parent, text="Forma", style="CardMuted.TLabel").grid(row=4, column=0, sticky="w", pady=3)
         shp = ttk.Frame(parent)
-        shp.grid(row=3, column=1, sticky="e")
+        shp.grid(row=4, column=1, sticky="e")
         ttk.Radiobutton(shp, text="Rect", value="rect", variable=self.var_shape,
                         command=self._apply_inspector).pack(side="left")
         ttk.Radiobutton(shp, text="Circulo", value="circle", variable=self.var_shape,
                         command=self._apply_inspector).pack(side="left")
-        ttk.Label(parent, text="Opacidad %", style="CardMuted.TLabel").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Label(parent, text="Opacidad %", style="CardMuted.TLabel").grid(row=5, column=0, sticky="w", pady=3)
         ttk.Scale(parent, from_=10, to=100, variable=self.var_op, orient="horizontal",
-                  command=lambda e: self._apply_inspector()).grid(row=4, column=1, sticky="ew", pady=3)
+                  command=lambda e: self._apply_inspector()).grid(row=5, column=1, sticky="ew", pady=3)
         self.var_chroma = tk.BooleanVar(value=False)
         ttk.Checkbutton(parent, text="Croma (quitar fondo verde)", variable=self.var_chroma,
-                        command=self._apply_inspector).grid(row=5, column=0, columnspan=2,
+                        command=self._apply_inspector).grid(row=6, column=0, columnspan=2,
                                                             sticky="w", pady=(6, 2))
         crop_row = ttk.Frame(parent)
-        crop_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        crop_row.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         self.btn_crop = ttk.Button(crop_row, text="✂ Recortar…", command=self._crop_dialog)
         self.btn_crop.pack(side="left")
         self.lbl_crop = ttk.Label(crop_row, text="", style="CardMuted.TLabel")
@@ -852,20 +857,25 @@ class App(tk.Tk):
             self._set_inspector_enabled(False)
             return
         self._loading = True
-        self.var_x.set(s.transform.x)
-        self.var_y.set(s.transform.y)
-        self.var_w.set(s.transform.w)
-        self.var_op.set(int(s.transform.opacity * 100))
-        self.var_shape.set(s.transform.shape)
-        self.var_chroma.set(bool(s.transform.chroma))
-        self.vis_btn.config(text="Mostrar" if not s.visible else "Ocultar")
-        self._set_inspector_enabled(True)
-        # el recorte solo aplica a fuentes de imagen real (pantalla/ventana/foto/video)
-        cropable = s.kind in (scn.KIND_SCREEN, scn.KIND_WINDOW, scn.KIND_IMAGE, scn.KIND_MEDIA)
-        self.btn_crop.config(state="normal" if cropable else "disabled")
-        c = s.transform.crop
-        self.lbl_crop.config(text=(f"recorte {c[2]}×{c[3]}" if c else ("" if cropable else "no aplica")))
-        self._loading = False
+        try:
+            self.var_x.set(s.transform.x)
+            self.var_y.set(s.transform.y)
+            self.var_w.set(s.transform.w)
+            self.var_h.set(s.transform.h)
+            self.var_op.set(int(s.transform.opacity * 100))
+            self.var_shape.set(s.transform.shape)
+            self.var_chroma.set(bool(s.transform.chroma))
+            self.vis_btn.config(text="Mostrar" if not s.visible else "Ocultar")
+            self._set_inspector_enabled(True)
+            # el recorte solo aplica a fuentes de imagen real (pantalla/ventana/foto/video)
+            cropable = s.kind in (scn.KIND_SCREEN, scn.KIND_WINDOW, scn.KIND_IMAGE, scn.KIND_MEDIA)
+            self.btn_crop.config(state="normal" if cropable else "disabled")
+            c = s.transform.crop
+            self.lbl_crop.config(text=(f"recorte {c[2]}×{c[3]}" if c else ("" if cropable else "no aplica")))
+        finally:
+            # sin el finally, un fallo aqui dejaba _loading en True para siempre
+            # y el inspector no volvia a aplicar nada (en silencio).
+            self._loading = False
 
     def _set_inspector_enabled(self, on: bool) -> None:
         state = "normal" if on else "disabled"
@@ -879,6 +889,18 @@ class App(tk.Tk):
                     except tk.TclError:
                         pass
 
+    @staticmethod
+    def _ival(var, minimo: int = -8000, maximo: int = 8000, default: int = 0) -> int:
+        """Lee un IntVar tolerando que el campo este vacio o con texto: un
+        Spinbox con -textvariable escribe la variable en CADA tecla, y un get()
+        con «» lanzaba TclError que abortaba _apply_inspector a medias y dejaba
+        TODO el inspector inerte hasta reiniciar."""
+        try:
+            v = int(var.get())
+        except (tk.TclError, ValueError, TypeError):
+            return default
+        return max(minimo, min(maximo, v))
+
     def _apply_inspector(self) -> None:
         if getattr(self, "_loading", False):
             return
@@ -886,13 +908,33 @@ class App(tk.Tk):
         if not s:
             return
         t = s.transform
-        t.x, t.y, t.w = int(self.var_x.get()), int(self.var_y.get()), int(self.var_w.get())
-        if t.shape == "circle" and t.w > 0:
-            t.h = t.w
-        t.opacity = max(0.1, min(1.0, self.var_op.get() / 100.0))
+        t.x, t.y = self._ival(self.var_x), self._ival(self.var_y)
+        t.w, t.h = self._ival(self.var_w, 0), self._ival(self.var_h, 0)
+        # la forma se asigna ANTES de cuadrar la caja: si se leia la forma vieja,
+        # al marcar «Circulo» hacia falta un segundo cambio para que el circulo
+        # se cuadrase (y parecia que la forma no hacia nada).
         t.shape = self.var_shape.get()
+        if t.shape == "circle":
+            # el circulo necesita caja cuadrada Y con tamano: si falta un lado se
+            # deriva del otro, y si no hay ninguno se da uno por defecto (antes
+            # marcar «Circulo» con tamano automatico no hacia nada visible).
+            lado = t.w or t.h or max(80, min(self.scene.canvas_w, self.scene.canvas_h) // 3)
+            t.w = t.h = int(lado)
+            self._sync_size_vars(t)
+        t.opacity = max(0.1, min(1.0, self._ival(self.var_op, 10, 100, 100) / 100.0))
         t.chroma = "#00D000" if self.var_chroma.get() else None
         self._preview_dirty = True
+
+    def _sync_size_vars(self, t) -> None:
+        """Refleja en el inspector un tamano ajustado por la app (sin re-aplicar)."""
+        if self._ival(self.var_w, 0) == t.w and self._ival(self.var_h, 0) == t.h:
+            return
+        self._loading = True
+        try:
+            self.var_w.set(t.w)
+            self.var_h.set(t.h)
+        finally:
+            self._loading = False
 
     # -- ajustes -----------------------------------------------------------
     def _on_canvas(self, _evt=None) -> None:
@@ -941,45 +983,42 @@ class App(tk.Tk):
         for s in self.scene.visible_sorted():
             t = s.transform
             try:
+                # 1) contenido real de la fuente (None -> se dibuja un marcador)
+                img = None
                 if s.kind == scn.KIND_SCREEN:
                     p = s.params
                     grab = self._mss.grab({"left": p["left"], "top": p["top"],
                                            "width": p["width"], "height": p["height"]})
-                    img = Image.frombytes("RGB", grab.size, grab.bgra, "raw", "BGRX")
-                    img = self._crop_img(img, t.crop)
+                    img = self._crop_img(Image.frombytes("RGB", grab.size, grab.bgra,
+                                                         "raw", "BGRX"), t.crop)
+                elif s.kind == scn.KIND_WINDOW:
+                    got = self._grab_source_frame(s)   # WGC (=lo que graba el motor)
+                    img = self._crop_img(got.convert("RGB"), t.crop) if got is not None else None
+                elif s.kind == scn.KIND_IMAGE:
+                    img = self._crop_img(Image.open(s.params["path"]).convert("RGBA"), t.crop)
+                elif s.kind == scn.KIND_COLOR:
+                    # el color se genera ya al tamano final (t.w/t.h o el lienzo),
+                    # igual que hace _source_input.
+                    img = Image.new("RGBA", (max(2, t.w or cw), max(2, t.h or ch)),
+                                    fu._hex_to_rgba(s.params.get("color", "#1E3A5F")))
+                elif s.kind == scn.KIND_TEXT:
+                    img = Image.open(fu.render_text_png(
+                        s.params.get("text", ""), int(s.params.get("size", 48)),
+                        s.params.get("color", "#FFFFFF"), s.params.get("bg"),
+                        work_dir(), name_hint=str(s.id))).convert("RGBA")
+                if img is None:                     # webcam/media/ventana no disponible
+                    w, h = self._draw_placeholder(canvas, s, cw, ch)
+                    boxes[s.id] = ((0, 0) if fu.fills_canvas(s) else (t.x, t.y)) + (w, h)
+                    continue
+                # 2) misma decision que build_scene: encajar en el lienzo o capa
+                if fu.fills_canvas(s):
                     img = self._fit(img, cw, ch)
                     ox, oy = (cw - img.width) // 2, (ch - img.height) // 2
-                    canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
-                    boxes[s.id] = (ox, oy, img.width, img.height)
-                elif s.kind == scn.KIND_WINDOW:
-                    img = self._grab_source_frame(s)   # WGC (=lo que graba el motor)
-                    if img is not None:
-                        img = self._crop_img(img.convert("RGB"), t.crop)
-                        img = self._fit(img, cw, ch)
-                        ox, oy = (cw - img.width) // 2, (ch - img.height) // 2
-                        canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
-                        boxes[s.id] = (ox, oy, img.width, img.height)
-                    else:
-                        w, h = self._draw_placeholder(canvas, s)
-                        boxes[s.id] = (t.x, t.y, w, h)
-                elif s.kind == scn.KIND_IMAGE:
-                    img = Image.open(s.params["path"]).convert("RGBA")
-                    img = self._crop_img(img, t.crop)   # el recorte tambien en el preview
-                    if t.w > 0:
-                        img = img.resize((t.w, max(1, int(img.height * t.w / img.width))))
-                    canvas.alpha_composite(img, (t.x, t.y))
-                    boxes[s.id] = (t.x, t.y, img.width, img.height)
-                elif s.kind == scn.KIND_COLOR:
-                    w, h = (t.w or cw), (t.h or ch)
-                    ov = Image.new("RGBA", (w, h), fu._hex_to_rgba(s.params.get("color", "#1E3A5F")))
-                    canvas.alpha_composite(ov, (t.x, t.y))
-                    boxes[s.id] = (t.x, t.y, w, h)
-                elif s.kind == scn.KIND_TEXT:
-                    w, h = self._draw_text_preview(canvas, s)
-                    boxes[s.id] = (t.x, t.y, w, h)
-                elif s.kind in (scn.KIND_WEBCAM, scn.KIND_MEDIA):
-                    w, h = self._draw_placeholder(canvas, s)
-                    boxes[s.id] = (t.x, t.y, w, h)
+                else:
+                    img = self._fit_preview(img, s)
+                    ox, oy = t.x, t.y
+                canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
+                boxes[s.id] = (ox, oy, img.width, img.height)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("preview src %s: %s", s.kind, exc)
         self._boxes = boxes
@@ -1028,28 +1067,71 @@ class App(tk.Tk):
         h = max(1, min(int(h), img.height - y))
         return img.crop((x, y, x + w, y + h))
 
-    def _draw_text_preview(self, canvas, s):
-        from PIL import Image
-        png = fu.render_text_png(s.params.get("text", ""), int(s.params.get("size", 48)),
-                                 s.params.get("color", "#FFFFFF"), s.params.get("bg"),
-                                 work_dir(), name_hint=str(s.id))
-        img = Image.open(png).convert("RGBA")
-        canvas.alpha_composite(img, (s.transform.x, s.transform.y))
-        return img.width, img.height
+    def _fit_preview(self, img, s):
+        """Aplica a la imagen la MISMA geometria que aplicara FFmpeg al grabar
+        (ver _layer_chain), para que la vista previa y el video coincidan: sin
+        esto se ajustaba el tamano y el preview no cambiaba (y no se podia
+        colocar la fuente porque su caja no era la real)."""
+        from PIL import Image, ImageDraw
+        t = s.transform
+        tw, th = max(0, int(t.w or 0)), max(0, int(t.h or 0))   # igual que _layer_chain
+        if tw > 0 and th > 0:
+            if s.kind == scn.KIND_TEXT:
+                # el texto se ajusta DENTRO de la caja y se centra: nunca se
+                # recorta (antes se forzaba a la caja y se cortaban las letras).
+                sc = min(tw / img.width, th / img.height)
+                nw, nh = max(1, int(img.width * sc)), max(1, int(img.height * sc))
+                fit = img.resize((nw, nh))
+                box = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+                box.alpha_composite(fit, ((tw - nw) // 2, (th - nh) // 2))
+                img = box
+            else:
+                # rellena la caja y recorta el sobrante (como object-fit: cover)
+                sc = max(tw / img.width, th / img.height)
+                nw, nh = max(1, int(img.width * sc)), max(1, int(img.height * sc))
+                img = img.resize((nw, nh)).crop(((nw - tw) // 2, (nh - th) // 2,
+                                                (nw - tw) // 2 + tw, (nh - th) // 2 + th))
+        elif tw > 0:
+            img = img.resize((tw, max(1, int(img.height * tw / img.width))))
+        elif th > 0:
+            img = img.resize((max(1, int(img.width * th / img.height)), th))
+        # Mismas condiciones que _layer_chain: la mascara circular solo se aplica
+        # con ancho Y alto fijados, y en ese caso el video NO aplica opacidad
+        # (son ramas excluyentes). Replicarlo evita que el preview mienta.
+        circulo = (t.shape == "circle" and tw > 0 and th > 0 and not t.chroma)
+        if circulo:
+            from PIL import ImageChops
+            mask = Image.new("L", img.size, 0)
+            ImageDraw.Draw(mask).ellipse([2, 2, img.width - 2, img.height - 2], fill=255)
+            img = img.copy()
+            # multiplica (no reemplaza) el alfa, igual que el video
+            img.putalpha(ImageChops.multiply(img.getchannel("A"), mask))
+        elif t.opacity < 1.0:
+            op = max(0.0, min(1.0, t.opacity))
+            img = img.copy()
+            img.putalpha(img.getchannel("A").point(lambda v: int(v * op)))
+        return img
 
-    def _draw_placeholder(self, canvas, s):
+    def _draw_placeholder(self, canvas, s, cw: int = 0, ch: int = 0):
+        """Marcador para fuentes sin contenido en el preview (webcam, video, o una
+        ventana no disponible). Respeta la misma decision que build_scene: si la
+        fuente se encaja en el lienzo, el marcador lo ocupa entero."""
         from PIL import ImageDraw
         t = s.transform
-        w = t.w or 340
-        h = t.h or (w if t.shape == "circle" else int(w * 9 / 16))
+        if fu.fills_canvas(s) and cw and ch:
+            x, y, w, h = 0, 0, cw, ch
+        else:
+            x, y = t.x, t.y
+            w = t.w or 340
+            h = t.h or (w if t.shape == "circle" else int(w * 9 / 16))
         d = ImageDraw.Draw(canvas)
-        box = [t.x, t.y, t.x + w, t.y + h]
+        box = [x, y, x + w, y + h]
         if t.shape == "circle":
             d.ellipse(box, fill=(206, 110, 97, 90), outline=(206, 110, 97, 255), width=4)
         else:
             d.rounded_rectangle(box, radius=14, fill=(30, 58, 95, 110),
                                 outline=(110, 193, 228, 255), width=4)
-        d.text((t.x + 14, t.y + h // 2 - 10), s.label(), fill=(255, 255, 255, 255))
+        d.text((x + 14, y + h // 2 - 10), s.label(), fill=(255, 255, 255, 255))
         return w, h
 
     def _pv_rect(self) -> tuple[int, int, int, int]:
