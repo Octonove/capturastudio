@@ -19,7 +19,7 @@ from . import ffmpeg_utils as fu
 from . import streaming as stream
 from . import (ai_post, models, content_factory, privacy_shield, bg_removal, meters,
                autoframe, chapters, quality_check, study, notes, llm, wordedit, cursorzoom,
-               winlist)
+               winlist, wincap)
 from .teacher_mode import PolishPanel
 from .config import (AppConfig, load_config, save_config, CANVAS_PRESETS,
                      VIDEO_QUALITY, QUALITY_ORDER, work_dir, get_data_dir, DEFAULT_HOTKEYS)
@@ -110,6 +110,10 @@ class App(tk.Tk):
         self._sel_id: int | None = None
         self._boxes: dict[int, tuple[float, float, float, float]] = {}
         self._drag = None
+        # Sesiones WGC persistentes para el preview/recorte de fuentes de ventana
+        # (a prueba de oclusion, MISMO espacio que la grabacion -> el recorte
+        # coincide al pixel). Clave: titulo de la ventana.
+        self._win_grabbers: dict = {}
 
         self._build_ui()
         self._sync_canvas_from_scene()
@@ -569,6 +573,46 @@ class App(tk.Tk):
         theme.center_window(win)
         win.grab_set()
 
+    # -- captura WGC de ventanas (preview / recorte) ----------------------
+    def _wgc_frame(self, title: str):
+        """Ultimo fotograma WGC (PIL RGB) de la ventana, o None si WGC no esta
+        disponible o falla. Mantiene una sesion persistente por titulo (a prueba
+        de oclusion y en el MISMO espacio que grabara el motor)."""
+        if not title or not wincap.available():
+            return None
+        hwnd = winlist.hwnd_for(title)
+        if not hwnd:
+            return None
+        gr = self._win_grabbers.get(title)
+        if gr is None or not gr.alive or gr.hwnd != hwnd:
+            if gr is not None:
+                try:
+                    gr.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            gr = wincap.WindowGrabber(hwnd)
+            try:
+                ok = gr.start()
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                self._win_grabbers.pop(title, None)
+                return None
+            self._win_grabbers[title] = gr
+        return gr.frame()
+
+    def _prune_grabbers(self) -> None:
+        """Cierra sesiones WGC de ventanas que ya no son fuentes visibles."""
+        if not self._win_grabbers:
+            return
+        active = {s.params.get("title", "") for s in self.scene.visible_sorted()
+                  if s.kind == scn.KIND_WINDOW}
+        for title in [t for t in self._win_grabbers if t not in active]:
+            try:
+                self._win_grabbers.pop(title).stop()
+            except Exception:  # noqa: BLE001
+                pass
+
     # -- recorte de una fuente --------------------------------------------
     def _grab_source_frame(self, s):
         """Un fotograma (PIL RGB, sin recortar) de la fuente, para el dialogo de
@@ -576,9 +620,13 @@ class App(tk.Tk):
         from PIL import Image
         try:
             if s.kind == scn.KIND_WINDOW:
-                # Igual que la grabacion (gdigrab de la region del area cliente):
-                # mss de esa misma region -> el preview coincide con lo grabado
-                # (framebuffer, funciona con apps GPU como Chrome).
+                # 1a opcion: WGC (a prueba de oclusion), la MISMA superficie de
+                # ventana que graba el motor -> el recorte coincide al pixel.
+                img = self._wgc_frame(s.params.get("title", ""))
+                if img is not None:
+                    return img
+                # Respaldo (WGC no disponible): mss de la region del area cliente,
+                # que es lo que grabara gdigrab en ese caso.
                 rect = winlist.window_rect(s.params.get("title", ""))
                 if not rect:
                     return None
@@ -874,6 +922,7 @@ class App(tk.Tk):
         # Al grabar bajamos la cadencia para no competir por CPU con la captura.
         try:
             self._render_preview()
+            self._prune_grabbers()
         except Exception as exc:  # noqa: BLE001
             logger.debug("preview: %s", exc)
         delay = 450 if (self.engine and self.engine.state == "recording") else 160
@@ -903,7 +952,7 @@ class App(tk.Tk):
                     canvas.alpha_composite(img.convert("RGBA"), (ox, oy))
                     boxes[s.id] = (ox, oy, img.width, img.height)
                 elif s.kind == scn.KIND_WINDOW:
-                    img = self._grab_source_frame(s)   # PrintWindow (=lo que graba gdigrab)
+                    img = self._grab_source_frame(s)   # WGC (=lo que graba el motor)
                     if img is not None:
                         img = self._crop_img(img.convert("RGB"), t.crop)
                         img = self._fit(img, cw, ch)
@@ -2546,6 +2595,12 @@ class App(tk.Tk):
                 self.hotkeys.stop()
             except Exception:  # noqa: BLE001
                 pass
+        for gr in list(self._win_grabbers.values()):
+            try:
+                gr.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        self._win_grabbers = {}
         try:
             if self._mss:
                 self._mss.close()
@@ -2559,4 +2614,7 @@ def main() -> None:
     from .monitors import set_dpi_awareness
     set_dpi_awareness()
     setup_logging()
+    logger.info("Captura de ventana WGC: %s",
+                "disponible (a prueba de oclusion)" if wincap.available()
+                else "no disponible; se usara gdigrab de region")
     App().mainloop()

@@ -48,13 +48,21 @@ if (-not $iscc) {
     exit 1
 }
 
-# 4) Compilar el instalador inyectando la version
+# 4) Compilar el instalador inyectando la version.
+#    Se compila a una carpeta TEMPORAL (via /O) porque el Windows Search Indexer
+#    bloquea intermitentemente la carpeta de salida bajo el perfil e Inno falla
+#    con "EndUpdateResource failed (110)". Luego se mueve a installer\.
+$tmpOut = Join-Path $env:TEMP "CapturaStudio_setup_build"
+New-Item -ItemType Directory -Force -Path $tmpOut | Out-Null
 Write-Host "Compilando instalador con: $iscc" -ForegroundColor Cyan
-& $iscc "/DMyAppVersion=$ver" (Join-Path $PSScriptRoot "CapturaStudio.iss")
-if ($LASTEXITCODE -eq 0) {
-    $out = Join-Path $root ("installer\CapturaStudio-Setup-$ver.exe")
-    Write-Host "`nInstalador: $out" -ForegroundColor Green
-} else {
+& $iscc "/DMyAppVersion=$ver" "/O$tmpOut" (Join-Path $PSScriptRoot "CapturaStudio.iss")
+if ($LASTEXITCODE -ne 0) {
     Write-Host "Fallo la creacion del instalador (codigo $LASTEXITCODE)." -ForegroundColor Red
     exit $LASTEXITCODE
 }
+$built = Join-Path $tmpOut "CapturaStudio-Setup-$ver.exe"
+$installerDir = Join-Path $root "installer"
+New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+$out = Join-Path $installerDir "CapturaStudio-Setup-$ver.exe"
+Move-Item -Force -Path $built -Destination $out
+Write-Host "`nInstalador: $out" -ForegroundColor Green

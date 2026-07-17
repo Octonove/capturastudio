@@ -141,6 +141,13 @@ def window_rect(title: str) -> tuple[int, int, int, int] | None:
     return _client_screen_rect(_hwnd_for(title))
 
 
+def hwnd_for(title: str):
+    """HWND (int) de la ventana con ese titulo exacto, o None. Publico para que
+    la captura WGC (wincap) apunte a la MISMA ventana que ve el resto de la app."""
+    h = _hwnd_for(title)
+    return int(h) if h else None
+
+
 def count_title(title: str) -> int:
     """Cuantas ventanas visibles comparten ESE titulo exacto (para avisar de que
     gdigrab no puede desambiguar y grabara la que este mas al frente)."""

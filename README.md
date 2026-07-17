@@ -31,6 +31,10 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
 - **Fuentes** componibles por capas: pantalla/monitor, **captura de una ventana**
   (elige la app de una lista de las que tienes abiertas), **webcam** (recorte
   circular o **chroma key**), imagen (con alfa), texto, color y vídeo/media.
+- **Captura de ventana tipo OBS** (Windows Graphics Capture): graba solo esa
+  ventana **aunque la tapes con otra** y **la sigue** si la mueves, también con
+  apps aceleradas por GPU (navegadores). En equipos antiguos cae automáticamente
+  a la captura por región.
 - **Recorte de la fuente**: marca en un clic la zona a grabar (p. ej. solo el
   contenido de una ventana, sin barras ni pestañas).
 - Editor de **layout** con inspector (posición, tamaño, forma, opacidad) y **vista

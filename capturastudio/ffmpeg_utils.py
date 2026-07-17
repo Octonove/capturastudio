@@ -242,7 +242,8 @@ class _InputBag:
         return idx
 
 
-def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path) -> list[str]:
+def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
+                  window_pipes: dict | None = None) -> list[str]:
     t = src.transform
     if src.kind == scn.KIND_SCREEN:
         p = src.params
@@ -252,10 +253,15 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path) -> list[st
                 "-video_size", f"{_even(int(p.get('width', 1920)))}x{_even(int(p.get('height', 1080)))}",
                 "-i", "desktop"]
     if src.kind == scn.KIND_WINDOW:
-        # gdigrab 'title=' hace BitBlt del DC de la ventana: sale NEGRO con apps
-        # aceleradas por GPU (Chrome, Edge, Electron...) y ademas con tamano DPI
-        # erroneo. Se graba la REGION de pantalla del area cliente (framebuffer
-        # de DWM): funciona con cualquier app. La region se resuelve al empezar.
+        # 1a opcion: WGC (Windows Graphics Capture, como OBS). El motor arranca un
+        # WindowPump que sirve los fotogramas por un named pipe; aqui solo leemos
+        # ese pipe como rawvideo. Es a prueba de OCLUSION y sigue a la ventana.
+        if window_pipes and src.id in window_pipes:
+            return list(window_pipes[src.id])
+        # Respaldo (WGC no disponible / fallo): gdigrab de la REGION del area
+        # cliente. gdigrab 'title=' hace BitBlt del DC -> NEGRO con apps GPU; la
+        # region captura el framebuffer de DWM (funciona con cualquier app) pero
+        # NO es a prueba de oclusion. Se resuelve al empezar.
         from . import winlist
         rect = winlist.window_rect(src.params.get("title", "")) or (0, 0, 1280, 720)
         x, y, w, h = rect
@@ -336,8 +342,11 @@ def _layer_chain(src: scn.Source, in_label: str, idx: int, bag: _InputBag,
 
 
 def build_scene(scene: scn.Scene, fps: int | None = None, cursor: bool = True,
-                tmp: Path | None = None) -> tuple[list[str], str, str]:
-    """Construye (input_args, filter_complex, '[vout]') para la escena."""
+                tmp: Path | None = None, window_pipes: dict | None = None) -> tuple[list[str], str, str]:
+    """Construye (input_args, filter_complex, '[vout]') para la escena.
+
+    window_pipes: {src.id: [args de entrada FFmpeg]} para fuentes de ventana que
+    el motor sirve por named pipe (WGC). Las que no esten, caen a gdigrab."""
     fps = fps or scene.fps
     tmp = tmp or work_dir()
     cw, ch = _even(scene.canvas_w), _even(scene.canvas_h)
@@ -353,12 +362,12 @@ def build_scene(scene: scn.Scene, fps: int | None = None, cursor: bool = True,
     filters: list[str] = []
     # capa base = fuente mas baja, escalada+padded al lienzo
     base = ordered[0]
-    bi = bag.add(_source_input(base, fps, cursor, tmp))
+    bi = bag.add(_source_input(base, fps, cursor, tmp, window_pipes))
     filters.append(_base_chain(f"{bi}:v", cw, ch, bg, "base", base.transform.crop))
     cur = "base"
 
     for src in ordered[1:]:
-        si = bag.add(_source_input(src, fps, cursor, tmp))
+        si = bag.add(_source_input(src, fps, cursor, tmp, window_pipes))
         chain, lbl = _layer_chain(src, f"{si}:v", si, bag, tmp)
         filters.append(chain)
         nxt = f"o{si}"
@@ -375,8 +384,9 @@ def build_scene(scene: scn.Scene, fps: int | None = None, cursor: bool = True,
 def build_record_command(*, ffmpeg_path: str, scene: scn.Scene, encoder: str,
                          quality_key: str, output_path: str, cursor: bool = True,
                          duration: int | None = None,
-                         tmp: Path | None = None) -> list[str]:
-    inputs, fc, vout = build_scene(scene, scene.fps, cursor, tmp)
+                         tmp: Path | None = None,
+                         window_pipes: dict | None = None) -> list[str]:
+    inputs, fc, vout = build_scene(scene, scene.fps, cursor, tmp, window_pipes)
     cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
     cmd += inputs
     cmd += ["-filter_complex", fc, "-map", vout]

@@ -9,6 +9,7 @@ los fallbacks en ai_post.py y autoframe.py). Si hay un ffprobe en el PATH del
 usuario, se usara; si no, los fallbacks cubren el caso."""
 
 import os
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 block_cipher = None
 
@@ -19,6 +20,12 @@ if ffmpeg_src and os.path.isfile(ffmpeg_src):
     # ahorrando ~210 MB en el paquete final.
     binaries.append((ffmpeg_src, "."))
 
+# Captura de ventana WGC (wincap.py): el .pyd nativo Rust de windows-capture.
+# Su import es perezoso, asi que hay que declararlo. cv2 se EXCLUYE: el
+# __init__.py lo importa pero solo lo usa save_as_image (no lo usamos); wincap
+# inyecta un stub de cv2 en runtime -> se evita empaquetar opencv (~44 MB).
+binaries += collect_dynamic_libs("windows_capture")
+
 icon_path = os.environ.get("APP_ICON", "")
 icon_arg = icon_path if (icon_path and os.path.isfile(icon_path)) else None
 
@@ -28,7 +35,8 @@ a = Analysis(
     binaries=binaries,
     datas=[],
     hiddenimports=['PIL._tkinter_finder', 'soundcard', 'soundcard.mediafoundation',
-                   '_cffi_backend', 'octonove_core.dshow'],
+                   '_cffi_backend', 'octonove_core.dshow',
+                   'windows_capture', 'windows_capture.windows_capture', 'numpy'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -37,7 +45,10 @@ a = Analysis(
               # la funcion 'quitar fondo' degrada con un aviso si no estan.
               'rembg', 'onnxruntime', 'numba', 'llvmlite', 'skimage', 'scikit-image',
               'pymatting', 'jsonschema', 'jsonschema_specifications', 'pooch',
-              'imageio', 'tifffile', 'scikit_image'],
+              'imageio', 'tifffile', 'scikit_image',
+              # cv2: windows_capture lo importa pero wincap inyecta un stub en
+              # runtime (solo lo usaria save_as_image, que no llamamos).
+              'cv2'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
