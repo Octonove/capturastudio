@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import ffmpeg_utils as fu
+from . import wincap
 from .streaming import AudioPipe, stream_video_args
 from .config import work_dir
 
@@ -52,9 +53,12 @@ class ReplayBuffer:
         self._audio = None
         self._dir = work_dir() / "replay"
         self._wrap = math.ceil(self.buffer_seconds / self.seg) + 2
+        # Captura WGC de ventanas (a prueba de oclusion), como en grabacion.
+        self._pumpset = wincap.WindowPumpSet()
 
     def _build_cmd(self, has_audio: bool) -> list[str]:
-        inputs, fc, vout = fu.build_scene(self.scene, self.scene.fps, self.cursor, work_dir())
+        inputs, fc, vout = fu.build_scene(self.scene, self.scene.fps, self.cursor,
+                                          work_dir(), self._pumpset.inputs)
         audio_idx = inputs.count("-i")
         cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "warning"]
         cmd += inputs
@@ -84,11 +88,13 @@ class ReplayBuffer:
             except OSError:
                 pass
         has_audio = AudioPipe(self.audio_system, self.audio_mic).enabled
+        self._pumpset.start(self.scene, self.scene.fps, self.cursor)
         try:
             self._proc = subprocess.Popen(
                 self._build_cmd(has_audio), stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **fu.subprocess_kwargs())
         except OSError as exc:
+            self._pumpset.stop()
             self.on_error(f"No se pudo iniciar el buffer: {exc}")
             return
         if has_audio:
@@ -104,6 +110,7 @@ class ReplayBuffer:
             if self._proc and self._proc.poll() is not None:
                 if self.state == "buffering":
                     self.state = "error"
+                    self._pumpset.stop()
                     self.on_error("El buffer de replay se detuvo inesperadamente.")
                 return
 
@@ -145,6 +152,7 @@ class ReplayBuffer:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+        self._pumpset.stop()
         for f in self._dir.glob("seg_*.ts"):
             try:
                 f.unlink()

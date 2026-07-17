@@ -17,8 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import ffmpeg_utils as fu
-from . import scene as scn
-from . import wincap, winlist
+from . import wincap
 from .audio_capture import AudioCapture
 from .config import work_dir
 
@@ -57,10 +56,9 @@ class RecordEngine:
         self.state = "idle"
         self._watch: threading.Thread | None = None
         # Captura WGC de ventanas: un WindowPump por fuente de ventana sirve sus
-        # fotogramas por named pipe (a prueba de oclusion). Se resuelven aqui y
-        # se inyectan en build_record_command; las que fallen caen a gdigrab.
-        self._pumps: dict = {}
-        self._win_inputs: dict = {}
+        # fotogramas por named pipe (a prueba de oclusion). Se inyectan en
+        # build_record_command; las que fallen (o si WGC no esta) caen a gdigrab.
+        self._pumpset = wincap.WindowPumpSet()
 
     @property
     def audio_problems(self) -> list[str]:
@@ -74,7 +72,7 @@ class RecordEngine:
                 return
             self.out_dir.mkdir(parents=True, exist_ok=True)
             self._audio.start()
-            self._start_pumps()
+            self._pumpset.start(self.scene, self.scene.fps, self.cursor)
             try:
                 self._start_segment()
                 # Red de seguridad: si FFmpeg muere de inmediato con un encoder
@@ -86,7 +84,7 @@ class RecordEngine:
                     self.encoder = "libx264"
                     self._start_segment()
             except EngineError:
-                self._stop_pumps()
+                self._pumpset.stop()
                 self._audio.stop()
                 self.state = "idle"
                 raise
@@ -133,45 +131,6 @@ class RecordEngine:
             self.state = "stopping"
         threading.Thread(target=self._finalize, args=(audio_paths,), daemon=True).start()
 
-    # -- captura WGC de ventanas ------------------------------------------
-    def _start_pumps(self) -> None:
-        """Arranca un WindowPump (WGC) por cada fuente de ventana visible. Los
-        que fallen -o si WGC no esta disponible- caeran a gdigrab de region."""
-        self._stop_pumps()
-        if not wincap.available():
-            return
-        for src in self.scene.visible_sorted():
-            if src.kind != scn.KIND_WINDOW:
-                continue
-            hwnd = winlist.hwnd_for(src.params.get("title", ""))
-            if not hwnd:
-                continue
-            pump = wincap.WindowPump(hwnd, self.scene.fps, name=str(src.id),
-                                     cursor=self.cursor)
-            try:
-                ok = pump.start()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("WindowPump WGC fallo para «%s»: %s",
-                               src.params.get("title", ""), exc)
-                ok = False
-            if ok:
-                self._pumps[src.id] = pump
-                self._win_inputs[src.id] = pump.ffmpeg_input()
-            else:
-                pump.stop()
-        if self._pumps:
-            logger.info("WGC activo para %d ventana(s).", len(self._pumps))
-
-    def _stop_pumps(self) -> None:
-        pumps = list(self._pumps.values())
-        self._pumps = {}
-        self._win_inputs = {}
-        for p in pumps:
-            try:
-                p.stop()
-            except Exception:  # noqa: BLE001
-                pass
-
     # -- segmentos ---------------------------------------------------------
     def _start_segment(self) -> None:
         seg = self._work / f".cs_seg_{len(self._segments)}.mp4"
@@ -182,7 +141,7 @@ class RecordEngine:
         cmd = fu.build_record_command(
             ffmpeg_path=self.ffmpeg, scene=self.scene, encoder=self.encoder,
             quality_key=self.quality_key, output_path=str(seg), cursor=self.cursor,
-            tmp=self._work, window_pipes=self._win_inputs)
+            tmp=self._work, window_pipes=self._pumpset.inputs)
         logger.info("Segmento %d: %s", len(self._segments), " ".join(cmd))
         log = open(self._seg_log, "ab")
         try:
@@ -242,7 +201,7 @@ class RecordEngine:
     # -- finalizacion ------------------------------------------------------
     def _finalize(self, audio_paths: list[str]) -> None:
         # los segmentos ya estan cerrados: los pumps WGC ya no hacen falta.
-        self._stop_pumps()
+        self._pumpset.stop()
         try:
             valid = [s for s in self._segments if s.is_file() and s.stat().st_size > 4096]
             if not valid:

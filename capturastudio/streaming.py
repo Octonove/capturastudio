@@ -17,6 +17,7 @@ from collections import deque
 from pathlib import Path
 
 from . import ffmpeg_utils as fu
+from . import wincap
 from .config import work_dir
 
 logger = logging.getLogger(__name__)
@@ -75,8 +76,9 @@ def build_stream_command(*, ffmpeg_path: str, scene, encoder: str, bitrate_k: in
                          cursor: bool = True, tmp: Path | None = None,
                          duration: int | None = None,
                          output_override: str | None = None,
-                         extra_ingests: list[str] | None = None) -> list[str]:
-    inputs, fc, vout = fu.build_scene(scene, scene.fps, cursor, tmp)
+                         extra_ingests: list[str] | None = None,
+                         window_pipes: dict | None = None) -> list[str]:
+    inputs, fc, vout = fu.build_scene(scene, scene.fps, cursor, tmp, window_pipes)
     audio_idx = inputs.count("-i")  # el pipe de audio es la entrada siguiente
     cmd = [ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-stats"]
     cmd += inputs
@@ -243,6 +245,9 @@ class StreamEngine:
         self._audio: AudioPipe | None = None
         self._stop = threading.Event()
         self._reconnects = 0
+        # Captura WGC de ventanas (a prueba de oclusion), como en grabacion. Los
+        # pumps sobreviven a las reconexiones: el named pipe se reconecta.
+        self._pumpset = wincap.WindowPumpSet()
         # Ultimas lineas de FFmpeg (ya redactadas) para poder mostrar el MOTIVO real
         # de un fallo (clave invalida, conexion rechazada…) en vez de un mensaje generico.
         self._errbuf: deque[str] = deque(maxlen=40)
@@ -250,6 +255,7 @@ class StreamEngine:
     def start(self) -> None:
         if self.state != "idle":
             return
+        self._pumpset.start(self.scene, self.scene.fps, self.cursor)
         self.state = "streaming"
         threading.Thread(target=self._supervise, daemon=True).start()
         self.on_state("streaming", None)
@@ -260,7 +266,7 @@ class StreamEngine:
             ffmpeg_path=self.ffmpeg, scene=self.scene, encoder=self.encoder,
             bitrate_k=self.bitrate_k, has_audio=has_audio, ingest=self.ingest,
             vod_path=self.vod_path, cursor=self.cursor, tmp=work_dir(),
-            extra_ingests=self.extra_ingests)
+            extra_ingests=self.extra_ingests, window_pipes=self._pumpset.inputs)
         logger.debug("Stream: %s", " ".join(cmd))  # nivel debug; el filtro de logging redacta la clave
         try:
             self._proc = subprocess.Popen(
@@ -278,6 +284,7 @@ class StreamEngine:
     def _supervise(self) -> None:
         while not self._stop.is_set():
             if not self._spawn():
+                self._pumpset.stop()
                 self.state = "error"
                 return
             self._proc.wait()
@@ -286,6 +293,7 @@ class StreamEngine:
             # muerte inesperada -> reconectar
             self._reconnects += 1
             if self._reconnects > self.MAX_RECONNECT:
+                self._pumpset.stop()
                 self.state = "error"
                 self.on_error(self._tail() or "Se perdio la conexion con el servidor.")
                 return
@@ -325,6 +333,7 @@ class StreamEngine:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+        self._pumpset.stop()
         self.state = "stopped"
         self.on_state("stopped", self.vod_path)
 

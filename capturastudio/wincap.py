@@ -247,6 +247,12 @@ class WindowPump:
         self._pipe = None
         self._stop = threading.Event()
         self._writer: threading.Thread | None = None
+        # stop() puede llegar a la vez desde dos hilos (p.ej. en streaming: el
+        # boton Parar y la ruta de error del supervisor). Sin este cerrojo, ambos
+        # leerian el MISMO handle y harian CloseHandle dos veces: Windows podria
+        # haber reasignado ese valor a otro pipe -> cerrariamos el ajeno.
+        self._stop_lock = threading.Lock()
+        self._stopped = False
 
     @property
     def size(self) -> tuple[int, int]:
@@ -320,6 +326,13 @@ class WindowPump:
                 pass
 
     def stop(self) -> None:
+        with self._stop_lock:
+            if self._stopped:
+                return          # idempotente: dos hilos no deben cerrar el mismo handle
+            self._stopped = True
+            self._stop_locked()
+
+    def _stop_locked(self) -> None:
         self._stop.set()
         self._sess.stop()
         # Despertar el escritor si esta bloqueado en ConnectNamedPipe: cerrar el
@@ -354,3 +367,63 @@ class WindowPump:
         elif alive_after:
             logger.warning("wgc-%s: el escritor no termino en 3s; se filtra el "
                            "handle del pipe para no cerrarlo en uso.", self.name)
+
+
+# ---------------------------------------------------------------------------
+# Conjunto de pumps de una escena (compartido por grabacion/streaming/replay)
+# ---------------------------------------------------------------------------
+class WindowPumpSet:
+    """Un WindowPump (WGC) por cada fuente de ventana visible de una escena.
+
+    Ciclo de vida comun a los tres motores (RecordEngine, StreamEngine,
+    ReplayBuffer): start() ANTES de lanzar FFmpeg, pasar `.inputs` como
+    `window_pipes` a build_scene/build_record_command/build_stream_command, y
+    stop() al terminar. Las ventanas cuyo pump falle -o si WGC no esta
+    disponible- no entran en `.inputs` y caen a gdigrab de region en build_scene.
+    Los pumps sobreviven a los relanzamientos de FFmpeg (segmentos de pausa,
+    reconexiones de streaming): el escritor reconecta el named pipe."""
+
+    def __init__(self) -> None:
+        self._pumps: dict = {}
+        self.inputs: dict = {}   # {src.id: [args de entrada FFmpeg]}
+
+    @property
+    def count(self) -> int:
+        return len(self._pumps)
+
+    def start(self, scene, fps: int, cursor: bool = True) -> None:
+        self.stop()
+        if not available():
+            return
+        from . import winlist                    # perezoso: sin acoplar imports
+        from . import scene as scn
+        for src in scene.visible_sorted():
+            if src.kind != scn.KIND_WINDOW:
+                continue
+            hwnd = winlist.hwnd_for(src.params.get("title", ""))
+            if not hwnd:
+                continue
+            pump = WindowPump(hwnd, fps, name=str(src.id), cursor=cursor)
+            try:
+                ok = pump.start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("WindowPump WGC fallo para «%s»: %s",
+                               src.params.get("title", ""), exc)
+                ok = False
+            if ok:
+                self._pumps[src.id] = pump
+                self.inputs[src.id] = pump.ffmpeg_input()
+            else:
+                pump.stop()
+        if self._pumps:
+            logger.info("WGC activo para %d ventana(s).", len(self._pumps))
+
+    def stop(self) -> None:
+        pumps = list(self._pumps.values())
+        self._pumps = {}
+        self.inputs = {}
+        for p in pumps:
+            try:
+                p.stop()
+            except Exception:  # noqa: BLE001
+                pass
