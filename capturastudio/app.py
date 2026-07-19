@@ -374,17 +374,24 @@ class App(tk.Tk):
         self._fit_window_to_content()
 
     def _fit_window_to_content(self) -> None:
-        """Crece la ventana si el contenido del modo actual no cabe: el panel de
-        'Pulir leccion' (Docente/Curso) es mas alto que la fila 'Directo' y, si la
-        ventana no crece, se cortaba por abajo. Nunca encoge; se acota a la pantalla."""
+        """Ajusta la ventana para que el contenido del modo actual quepa: el panel
+        de 'Pulir leccion' (Docente/Curso) es mas alto que la fila 'Directo'. Crece
+        la ventana y, si al crecer se saldria por abajo de la pantalla, la SUBE
+        (esa era la causa de que siguiera cortandose). Nunca encoge."""
         try:
             self.update_idletasks()
             need = self.winfo_reqheight()
             cur = self.winfo_height()
-            maxh = self.winfo_screenheight() - 64   # margen para la barra de tareas
-            newh = min(need, maxh)
-            if newh > cur:
-                self.geometry(f"{self.winfo_width()}x{newh}")
+            # alto util de pantalla (descontando barra de tareas + barra de titulo)
+            avail = self.winfo_screenheight() - 96
+            newh = min(need, avail)
+            if newh <= cur:
+                return
+            x, y = self.winfo_x(), self.winfo_y()
+            # si la ventana ya no cabria de alto desde su posicion, subela
+            if y + newh > avail:
+                y = max(0, avail - newh)
+            self.geometry(f"{self.winfo_width()}x{newh}+{x}+{y}")
         except tk.TclError:
             pass
 

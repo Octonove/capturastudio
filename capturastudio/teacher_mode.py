@@ -25,7 +25,7 @@ class PolishPanel(ttk.LabelFrame):
     """Opciones de 'Pulir leccion' (post-produccion) sobre la ultima grabacion."""
 
     def __init__(self, parent, app, profile: str = "docente"):
-        super().__init__(parent, text="✨ Pulir leccion (post-produccion con IA local)", padding=8)
+        super().__init__(parent, text="✨ Pulir leccion (post-produccion con IA local)", padding=6)
         self.app = app
         self.profile = profile if profile in ("docente", "curso") else "docente"
         self.source_video: str | None = None
@@ -49,9 +49,10 @@ class PolishPanel(ttk.LabelFrame):
         self.btn_polish.pack(side="right")
 
         opts = ttk.Frame(self); opts.pack(fill="x", pady=(6, 0))
-        # columna A (3 filas: se reparten las casillas para que el panel no quede
-        # tan alto que se corte por abajo en Docente/Curso)
-        ca = ttk.Frame(opts); ca.grid(row=0, column=0, sticky="nw", padx=(0, 24))
+        # 3 columnas de opciones (max 3 filas) + material del curso a la derecha.
+        # Antes eran columnas mas altas y el panel se cortaba por abajo en
+        # Docente/Curso; asi es mas bajo y a lo ancho cabe en la ventana.
+        ca = ttk.Frame(opts); ca.grid(row=0, column=0, sticky="nw", padx=(0, 22))
         self.var_silence = tk.BooleanVar(value=True)
         ttk.Checkbutton(ca, text="Quitar pausas y muletillas", variable=self.var_silence).pack(anchor="w")
         self.var_subs = tk.BooleanVar(value=True)
@@ -59,33 +60,34 @@ class PolishPanel(ttk.LabelFrame):
         self.var_subs_en = tk.BooleanVar(value=False)
         ttk.Checkbutton(ca, text="     + .srt traducido al ingles", variable=self.var_subs_en).pack(anchor="w")
 
-        # columna B
-        cb = ttk.Frame(opts); cb.grid(row=0, column=1, sticky="nw", padx=(0, 24))
+        cb = ttk.Frame(opts); cb.grid(row=0, column=1, sticky="nw", padx=(0, 22))
         self.var_autoframe = tk.BooleanVar(value=False)
         ttk.Checkbutton(cb, text="Auto-encuadre: seguirme", variable=self.var_autoframe).pack(anchor="w")
         # zoom al cursor: opcion de captura que el estudio aplica al grabar
         self.var_cursorzoom = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cb, text="🔍 Zoom que sigue mi cursor (al grabar)",
+        ttk.Checkbutton(cb, text="🔍 Zoom que sigue mi cursor",
                         variable=self.var_cursorzoom).pack(anchor="w")
-        pr = ttk.Frame(cb); pr.pack(anchor="w")
+
+        cc = ttk.Frame(opts); cc.grid(row=0, column=2, sticky="nw", padx=(0, 22))
+        pr = ttk.Frame(cc); pr.pack(anchor="w")
         self.var_priv = tk.BooleanVar(value=False)
         ttk.Checkbutton(pr, text="Difuminar datos de alumnos", variable=self.var_priv).pack(side="left")
         ttk.Button(pr, text="Zonas…", command=self._add_region, width=7).pack(side="left", padx=4)
         self.lbl_regions = ttk.Label(pr, text="", style="Muted.TLabel"); self.lbl_regions.pack(side="left")
         self.var_factory = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cb, text="Material multiplataforma (vertical + MP3 + SRT)",
+        ttk.Checkbutton(cc, text="Material multiplataforma (9:16 + MP3 + SRT)",
                         variable=self.var_factory).pack(anchor="w")
 
-        # columna C: material del curso (exclusivo)
+        # columna material del curso (exclusivo Curso): a la derecha
         self.var_chapters = tk.BooleanVar(value=(self.profile == "curso"))
         self.var_notes = tk.BooleanVar(value=False)
         self.var_quiz = tk.BooleanVar(value=False)
         if self.profile == "curso":
-            cc = ttk.LabelFrame(opts, text="📚 Material del curso", padding=6)
-            cc.grid(row=0, column=2, sticky="nw")
-            ttk.Checkbutton(cc, text="Capitulos + indice (YouTube)", variable=self.var_chapters).pack(anchor="w")
-            ttk.Checkbutton(cc, text="Auto-apuntes (PDF)", variable=self.var_notes).pack(anchor="w")
-            ttk.Checkbutton(cc, text="Resumen + autoexamen", variable=self.var_quiz).pack(anchor="w")
+            ccurso = ttk.LabelFrame(opts, text="📚 Material del curso", padding=(6, 2))
+            ccurso.grid(row=0, column=3, sticky="nw")
+            ttk.Checkbutton(ccurso, text="Capitulos + indice (YouTube)", variable=self.var_chapters).pack(anchor="w")
+            ttk.Checkbutton(ccurso, text="Auto-apuntes (PDF)", variable=self.var_notes).pack(anchor="w")
+            ttk.Checkbutton(ccurso, text="Resumen + autoexamen", variable=self.var_quiz).pack(anchor="w")
 
     def _set_step2_enabled(self, on: bool) -> None:
         self.btn_polish.config(state=("normal" if on and self.source_video else "disabled"))
