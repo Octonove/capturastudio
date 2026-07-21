@@ -23,7 +23,7 @@ from . import (ai_post, models, content_factory, privacy_shield, bg_removal, met
 from .teacher_mode import PolishPanel
 from .config import (AppConfig, load_config, save_config, CANVAS_PRESETS,
                      VIDEO_QUALITY, QUALITY_ORDER, work_dir, get_data_dir, DEFAULT_HOTKEYS)
-from .monitors import list_monitors, primary_monitor
+from .monitors import list_monitors, primary_monitor, work_area_v
 from .audio_capture import list_microphones, AVAILABLE as AUDIO_OK
 from .engine import RecordEngine
 from .hotkeys import (GlobalHotkeys, parse_hotkey, format_hotkey, keysym_to_vk,
@@ -286,12 +286,20 @@ class App(tk.Tk):
 
         src_box = ttk.LabelFrame(left, text="Fuentes de la escena", padding=10)
         src_box.pack(fill="x")
-        self.src_list = tk.Listbox(src_box, height=8, activestyle="none",
+        # Lista mas baja (6 filas) + scrollbar: la columna izquierda era el bloque
+        # que mas alto sumaba y hacia que en pantallas bajas (DPI altos) se cortara
+        # el panel de 'Pulir leccion'. Con scrollbar no se oculta ninguna fuente.
+        lb_row = ttk.Frame(src_box)
+        lb_row.pack(fill="x")
+        self.src_list = tk.Listbox(lb_row, height=5, activestyle="none",
                                    font=(theme.FONT, 10), bg=theme.WHITE, fg=theme.TEXT,
                                    selectbackground=theme.PRIMARY, selectforeground=theme.WHITE,
                                    highlightthickness=1, highlightbackground=theme.BORDER,
                                    relief="flat", exportselection=False, width=34)
-        self.src_list.pack(fill="x")
+        self.src_list.pack(side="left", fill="both", expand=True)
+        src_sb = ttk.Scrollbar(lb_row, orient="vertical", command=self.src_list.yview)
+        self.src_list.configure(yscrollcommand=src_sb.set)
+        src_sb.pack(side="right", fill="y")
         self.src_list.bind("<<ListboxSelect>>", self._on_select_source)
 
         btns = ttk.Frame(src_box)
@@ -374,24 +382,47 @@ class App(tk.Tk):
         self._fit_window_to_content()
 
     def _fit_window_to_content(self) -> None:
-        """Ajusta la ventana para que el contenido del modo actual quepa: el panel
-        de 'Pulir leccion' (Docente/Curso) es mas alto que la fila 'Directo'. Crece
-        la ventana y, si al crecer se saldria por abajo de la pantalla, la SUBE
-        (esa era la causa de que siguiera cortandose). Nunca encoge."""
+        """Ajusta la ventana al contenido del modo actual. El panel de 'Pulir
+        leccion' (Docente/Curso) es mas alto que la fila 'Directo' a la que
+        sustituye. Se le da a la ventana el alto que pide, PERO acotado al AREA DE
+        TRABAJO real del monitor (pantalla menos barra de tareas) y descontando la
+        barra de titulo. Si el contenido no cabe, el preview -que es elastico
+        (expand=True)- se encoge y el panel sigue COMPLETO; el fallo anterior era
+        agrandar la ventana por debajo de la barra de tareas (margen fijo de 96 px,
+        corto a DPI altos) y cortar la ultima fila del panel. Ademas reposiciona la
+        ventana para que quepa entera en el area de trabajo."""
         try:
             self.update_idletasks()
             need = self.winfo_reqheight()
             cur = self.winfo_height()
-            # alto util de pantalla (descontando barra de tareas + barra de titulo)
-            avail = self.winfo_screenheight() - 96
-            newh = min(need, avail)
-            if newh <= cur:
+            scale = 1.0
+            try:
+                scale = max(1.0, self.winfo_fpixels("1i") / 96.0)
+            except tk.TclError:
+                pass
+            # grosor de la barra de titulo/borde superior (rooty-y) y colchon inferior
+            frame_top = self.winfo_rooty() - self.winfo_y()
+            if frame_top <= 0:
+                frame_top = int(round(31 * scale))
+            cushion = int(round(8 * scale))
+            wa_top, wa_bottom = work_area_v(self.winfo_id())
+            max_h = (wa_bottom - wa_top) - frame_top - cushion
+            if max_h < 240:                       # datos raros: no toques la ventana
                 return
+            target = min(need, max_h)
+            if target > cur:                      # necesita mas alto y cabe en pantalla
+                newh = target
+            elif cur > max_h:                     # quedo mas alta de lo que cabe -> reduce
+                newh = max_h
+            else:
+                newh = cur
             x, y = self.winfo_x(), self.winfo_y()
-            # si la ventana ya no cabria de alto desde su posicion, subela
-            if y + newh > avail:
-                y = max(0, avail - newh)
-            self.geometry(f"{self.winfo_width()}x{newh}+{x}+{y}")
+            if y < wa_top:                        # arriba del area util
+                y = wa_top
+            if y + frame_top + newh + cushion > wa_bottom:   # se saldria por abajo
+                y = max(wa_top, wa_bottom - frame_top - newh - cushion)
+            if newh != cur or y != self.winfo_y():
+                self.geometry(f"{self.winfo_width()}x{newh}+{x}+{y}")
         except tk.TclError:
             pass
 

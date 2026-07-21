@@ -78,16 +78,19 @@ class PolishPanel(ttk.LabelFrame):
         ttk.Checkbutton(cc, text="Material multiplataforma (9:16 + MP3 + SRT)",
                         variable=self.var_factory).pack(anchor="w")
 
-        # columna material del curso (exclusivo Curso): a la derecha
+        # columna material del curso (exclusivo Curso): a la derecha. SIN LabelFrame:
+        # su titulo anadia una 4a fila y hacia el panel mas alto que las demas
+        # columnas -> se cortaba por abajo en pantallas bajas. El 📚 en la 1a casilla
+        # basta para agrupar visualmente y deja la columna en 3 filas como el resto.
         self.var_chapters = tk.BooleanVar(value=(self.profile == "curso"))
         self.var_notes = tk.BooleanVar(value=False)
         self.var_quiz = tk.BooleanVar(value=False)
         if self.profile == "curso":
-            ccurso = ttk.LabelFrame(opts, text="📚 Material del curso", padding=(6, 2))
-            ccurso.grid(row=0, column=3, sticky="nw")
-            ttk.Checkbutton(ccurso, text="Capitulos + indice (YouTube)", variable=self.var_chapters).pack(anchor="w")
-            ttk.Checkbutton(ccurso, text="Auto-apuntes (PDF)", variable=self.var_notes).pack(anchor="w")
-            ttk.Checkbutton(ccurso, text="Resumen + autoexamen", variable=self.var_quiz).pack(anchor="w")
+            cd = ttk.Frame(opts)
+            cd.grid(row=0, column=3, sticky="nw")
+            ttk.Checkbutton(cd, text="📚 Capitulos + indice (YouTube)", variable=self.var_chapters).pack(anchor="w")
+            ttk.Checkbutton(cd, text="📚 Auto-apuntes (PDF)", variable=self.var_notes).pack(anchor="w")
+            ttk.Checkbutton(cd, text="📚 Resumen + autoexamen", variable=self.var_quiz).pack(anchor="w")
 
     def _set_step2_enabled(self, on: bool) -> None:
         self.btn_polish.config(state=("normal" if on and self.source_video else "disabled"))
