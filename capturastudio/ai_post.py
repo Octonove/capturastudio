@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -83,7 +84,11 @@ def transcribe_srt(ffmpeg_path: str, model_file: str, input_file: str,
         Path(out_srt).unlink(missing_ok=True)
     except OSError:
         pass
-    os.replace(str(tmp_path), out_srt)
+    # shutil.move (no os.replace) porque el temporal vive en la carpeta del modelo
+    # (AppData, en C:) y el destino puede estar en OTRA unidad (p.ej. el video en
+    # D:\): os.replace/os.rename fallan entre discos con [WinError 17]. shutil.move
+    # copia+borra cuando cruza de unidad.
+    shutil.move(str(tmp_path), out_srt)
     if progress_cb:
         progress_cb(1.0)
     return Path(out_srt).read_text(encoding="utf-8", errors="replace")
