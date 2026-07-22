@@ -140,6 +140,15 @@ class PolishPanel(ttk.LabelFrame):
             return
         do_priv = self.var_priv.get() and self.regions
         do_cursor = bool(self._cursor_samples and self._cursor_for == video)
+        # El zoom al cursor necesita la posicion del raton, que solo se capta al GRABAR
+        # con la app. En un video importado no hay esos datos: avisamos en vez de
+        # omitirlo en silencio (el resto de mejoras si se aplican).
+        if self.var_cursorzoom.get() and not do_cursor:
+            messagebox.showinfo(
+                APP_NAME, "El «zoom que sigue mi cursor» solo funciona en videos GRABADOS "
+                "con la app (capta la posicion del raton mientras grabas). Este video es "
+                "importado, asi que esa opcion se omitira; el resto de mejoras si se aplican.",
+                parent=self.app)
         do_sil = self.var_silence.get()
         do_frame = self.var_autoframe.get() and not do_cursor
         do_subs = self.var_subs.get()

@@ -60,10 +60,31 @@ def _title_from(text: str, max_len: int = 60) -> str:
     return t or "Capitulo"
 
 
+def _time_chapters(segments: list[tuple[float, float, str]], n: int) -> list[tuple[float, str]]:
+    """Reparte n capitulos por TIEMPO (para narracion continua sin silencios, tipica
+    de YouTube). El titulo de cada uno es la frase que se esta diciendo en esa marca."""
+    duration = segments[-1][1]
+    chapters: list[tuple[float, str]] = []
+    for k in range(n):
+        b = duration * k / n
+        seg = segments[0]
+        for s in segments:            # ultima frase que empieza en o antes de la marca
+            if s[0] <= b:
+                seg = s
+            else:
+                break
+        chapters.append((round(b, 2), _title_from(seg[2])))
+    chapters[0] = (0.0, chapters[0][1])
+    return chapters
+
+
 def group_chapters(segments: list[tuple[float, float, str]], *, min_gap: float = 2.5,
-                   min_len: float = 12.0, max_n: int = 30) -> list[tuple[float, str]]:
+                   min_len: float = 12.0, max_n: int = 30,
+                   target_len: float = 75.0) -> list[tuple[float, str]]:
     """Agrupa segmentos en capitulos. Frontera = hueco de silencio > min_gap.
-    Garantiza que el primero empieza en 0 y fusiona capitulos demasiado cortos."""
+    Garantiza que el primero empieza en 0 y fusiona capitulos demasiado cortos.
+    Si el video dura bastante pero apenas hay silencios (narracion continua), cae a
+    un reparto por tiempo cada ~target_len s para que el indice sea util igualmente."""
     if not segments:
         return [(0.0, "Capitulo 1")]
     chapters: list[tuple[float, str]] = [(0.0, _title_from(segments[0][2]))]
@@ -72,6 +93,14 @@ def group_chapters(segments: list[tuple[float, float, str]], *, min_gap: float =
         if start - prev_end >= min_gap and start - chapters[-1][0] >= min_len:
             chapters.append((start, _title_from(txt)))
         prev_end = end
+    # Respaldo por tiempo: los videos editados (YouTube) casi no tienen silencios
+    # largos, asi que la deteccion por huecos daria un solo capitulo (0:00). Solo si
+    # la deteccion por tema FALLO (quedo el unico 0:00) y el video da para varios,
+    # repartimos por tiempo. Si encontro >=2 fronteras reales, se respetan.
+    duration = segments[-1][1]
+    desired = int(duration // target_len)
+    if len(chapters) < 2 and desired >= 2:
+        chapters = _time_chapters(segments, min(desired, max_n))
     # recortar si hay demasiados (mantener los mas separados no es trivial; cap simple)
     if len(chapters) > max_n:
         step = len(chapters) / max_n
