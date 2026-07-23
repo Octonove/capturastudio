@@ -16,6 +16,7 @@ import tkinter as tk
 
 from . import APP_NAME
 from . import ai_post, models, content_factory, privacy_shield, autoframe, chapters
+from . import quality_check
 from . import study, notes, cursorzoom  # noqa: F401  (cursorzoom usado en _polish)
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,26 @@ class PolishPanel(ttk.LabelFrame):
         do_notes = self.var_notes.get()
         do_quiz = self.var_quiz.get()
         do_fac = self.var_factory.get()
+        # Un video SIN pista de audio (grabar solo pantalla, sin micro ni audio de
+        # sistema) rompe todo lo que depende del sonido: el recorte de silencios
+        # referencia [0:a] y FFmpeg aborta ("matches no streams"), tumbando el pulido
+        # entero. Se avisa y se omiten esas mejoras; el resto se aplica igual.
+        with_audio = quality_check.has_audio_stream(self.app.ffmpeg, video)
+        if not with_audio:
+            omitidas = [n for n, on in (("quitar pausas y muletillas", do_sil),
+                                        ("subtitulos accesibles", do_subs),
+                                        ("+ .srt traducido al ingles", do_subs_en),
+                                        ("capitulos + indice", do_chap),
+                                        ("auto-apuntes (PDF)", do_notes),
+                                        ("resumen + autoexamen", do_quiz)) if on]
+            do_sil = do_subs = do_subs_en = do_chap = do_notes = do_quiz = False
+            if omitidas:
+                messagebox.showinfo(
+                    APP_NAME, "Este video no tiene pista de audio, asi que se omitiran las "
+                    "mejoras que dependen del sonido:\n\n• " + "\n• ".join(omitidas) +
+                    "\n\nLo demas (privacidad, zoom al cursor, auto-encuadre y video "
+                    "vertical) si se aplicara.\n\nConsejo: para que se apliquen, graba con "
+                    "el micro o el audio del sistema activado.", parent=self.app)
         if not any((do_priv, do_cursor, do_sil, do_frame, do_subs, do_chap, do_notes,
                     do_quiz, do_fac)):
             messagebox.showinfo(APP_NAME, "Elige al menos una mejora.", parent=self.app)
@@ -238,7 +259,8 @@ class PolishPanel(ttk.LabelFrame):
             extras = []
             if do_fac:
                 extras = content_factory.make_package(
-                    ff, final, str(outdir / f"{stem}_material"), vertical=True, audio=True,
+                    ff, final, str(outdir / f"{stem}_material"), vertical=True,
+                    audio=with_audio,   # sin pista de audio no hay MP3 que extraer
                     gif=False, subtitles=False, encoder=enc, quality_key=qk)
                 steps.append(f"material x{len(extras)}")
             return final, steps, extras

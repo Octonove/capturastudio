@@ -160,6 +160,11 @@ def cut_silences(ffmpeg_path: str, video: str, out_path: str, *, noise_db: int =
                  min_silence: float = 0.6, padding: float = 0.10,
                  encoder: str = "libx264", quality_key: str = "alta") -> dict:
     """Elimina los silencios largos. Devuelve {orig, final, segmentos}."""
+    # Sin audio no hay silencios que detectar: silencedetect no marca nada y se
+    # acabaria re-codificando el video entero para nada. Mejor decirlo claro.
+    from .quality_check import has_audio_stream
+    if not has_audio_stream(ffmpeg_path, video):
+        raise AIError("El video no tiene pista de audio: no hay pausas que recortar.")
     total = get_duration(ffmpeg_path, video)
     speech = detect_speech_segments(ffmpeg_path, video, noise_db, min_silence)
     # padding + fusion de tramos casi contiguos
@@ -185,17 +190,29 @@ def render_segments(ffmpeg_path: str, video: str, out_path: str, segs, *,
     segs = [(float(s), float(e)) for s, e in segs if e - s > 0.02]
     if not segs:
         raise AIError("No quedan tramos que conservar.")
+    # Si el video NO tiene pista de audio (p.ej. grabar solo pantalla sin micro ni
+    # audio de sistema), el grafo debe ser SOLO video: si no, '[0:a]' no casa con
+    # ningun stream y FFmpeg aborta con "matches no streams".
+    from .quality_check import has_audio_stream
+    with_audio = has_audio_stream(ffmpeg_path, video)
     parts_v, parts_a, labels = [], [], ""
     for i, (st, en) in enumerate(segs):
         parts_v.append(f"[0:v]trim=start={st:.3f}:end={en:.3f},setpts=PTS-STARTPTS[v{i}]")
-        parts_a.append(f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[a{i}]")
-        labels += f"[v{i}][a{i}]"
-    graph = ";".join(parts_v + parts_a) + f";{labels}concat=n={len(segs)}:v=1:a=1[v][a]"
+        labels += f"[v{i}]"
+        if with_audio:
+            parts_a.append(f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[a{i}]")
+            labels += f"[a{i}]"
+    graph = (";".join(parts_v + parts_a)
+             + f";{labels}concat=n={len(segs)}:v=1:a={1 if with_audio else 0}[v]"
+             + ("[a]" if with_audio else ""))
     cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
-           "-i", video, "-filter_complex", graph, "-map", "[v]", "-map", "[a]",
-           "-c:v", encoder] + fu.quality_args(encoder, quality_key) + [
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-           "-movflags", "+faststart", out_path]
+           "-i", video, "-filter_complex", graph, "-map", "[v]"]
+    if with_audio:
+        cmd += ["-map", "[a]"]
+    cmd += ["-c:v", encoder] + fu.quality_args(encoder, quality_key) + ["-pix_fmt", "yuv420p"]
+    if with_audio:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-movflags", "+faststart", out_path]
     proc = subprocess.run(cmd, capture_output=True, timeout=1800, **fu.subprocess_kwargs())
     if proc.returncode != 0 or not Path(out_path).is_file():
         raise AIError(fu._decode(proc.stderr)[-400:] or "No se pudo recortar.")
