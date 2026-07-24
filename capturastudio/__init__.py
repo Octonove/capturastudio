@@ -9,4 +9,4 @@ superpoderes de IA local (subtitulos Whisper, recorte de silencios, etc.).
 from __future__ import annotations
 
 APP_NAME = "CapturaStudio"
-APP_VERSION = "1.4.8"   # fuente unica de version: build-installer.ps1 la inyecta al .iss
+APP_VERSION = "1.4.9"   # fuente unica de version: build-installer.ps1 la inyecta al .iss

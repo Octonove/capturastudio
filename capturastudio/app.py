@@ -1486,7 +1486,14 @@ class App(tk.Tk):
                 self._cursor_logger = None
             if self._polish_panel is not None:
                 self._polish_panel.set_source(path, cursor_samples=samples, cursor_region=region)
-                self._set_status(f"Grabacion lista. Marca mejoras y pulsa 'Pulir leccion'.")
+                # Confirmar que el ORIGINAL quedo guardado (en Docente/Curso no hay
+                # dialogo de "guardado" porque se pasa directo al panel de pulido) y,
+                # si se grabo con zoom, avisar de que el raton quedo registrado.
+                zoom_ok = bool(samples) and len(samples) >= 2
+                self._set_status(
+                    f"Grabacion guardada: {Path(path).name}"
+                    + ("  ·  ✓ raton registrado para el zoom" if zoom_ok else "")
+                    + ".  Marca mejoras y pulsa 'Pulir leccion'.")
                 return
             if messagebox.askyesno(APP_NAME, f"Guardado en:\n{path}\n\nAbrir la carpeta?"):
                 try:
