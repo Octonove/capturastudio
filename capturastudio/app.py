@@ -19,7 +19,7 @@ from . import ffmpeg_utils as fu
 from . import streaming as stream
 from . import (ai_post, models, content_factory, privacy_shield, bg_removal, meters,
                autoframe, chapters, quality_check, study, notes, llm, wordedit, cursorzoom,
-               winlist, wincap)
+               winlist, wincap, editor)
 from .teacher_mode import PolishPanel
 from .config import (AppConfig, load_config, save_config, CANVAS_PRESETS,
                      VIDEO_QUALITY, QUALITY_ORDER, work_dir, get_data_dir, DEFAULT_HOTKEYS)
@@ -1641,6 +1641,7 @@ class App(tk.Tk):
         ia.add_command(label="Foco de ventana (oscurecer el resto)…", command=self._ai_focus)
         ia.add_command(label="Quitar fondo de una imagen (IA)…", command=self._ai_remove_bg)
         mb.add_cascade(label="Post-produccion IA", menu=ia)
+        mb.add_command(label="🎬 Editor", command=self._open_editor)
         mb.add_command(label="🚀 Modos", command=self._show_mode_chooser)
         esc = tk.Menu(mb, tearoff=0)
         esc.add_command(label="Abrir proyecto…", command=self._open_scene)
@@ -2467,7 +2468,7 @@ class App(tk.Tk):
         video = self._pick_video("Elige el video para enfocar una ventana")
         if not video:
             return
-        region = self._ask_region()
+        region = self._ask_region(video)
         if not region:
             return
 
@@ -2546,6 +2547,18 @@ class App(tk.Tk):
         ttk.Button(bar, text="Generar", style="Primary.TButton", command=ok).pack(side="left", padx=6)
         win.wait_window()
         return res or None
+
+    def _open_editor(self) -> None:
+        """Editor con linea de tiempo: textos, imagenes, difuminados y cortes."""
+        if not self.ffmpeg:
+            return
+        video = self._pick_video("Elige el video a editar")
+        if not video:
+            return
+        try:
+            editor.EditorWindow(self, video)
+        except editor.EditorError as exc:
+            messagebox.showerror(APP_NAME, str(exc))
 
     def _ai_export_gif(self) -> None:
         if not self.ffmpeg:
@@ -2637,7 +2650,7 @@ class App(tk.Tk):
         video = self._pick_video("Elige el video a censurar")
         if not video:
             return
-        region = self._ask_region()
+        region = self._ask_region(video)
         if not region:
             return
 
@@ -2651,7 +2664,15 @@ class App(tk.Tk):
         self._run_with_progress("Aplicando escudo de privacidad…", work,
                                 lambda r: f"Video censurado:\n{r}")
 
-    def _ask_region(self) -> "privacy_shield.BlurRegion | None":
+    def _ask_region(self, video: str | None = None) -> "privacy_shield.BlurRegion | None":
+        # Con un video a mano, seleccion VISUAL: dibujar el rectangulo arrastrando
+        # sobre un fotograma real. El dialogo numerico queda como respaldo (sin
+        # video o si el fotograma no se puede leer).
+        if video and self.ffmpeg:
+            try:
+                return editor.pick_blur_region(self, self.ffmpeg, video)
+            except tk.TclError:
+                pass
         win = tk.Toplevel(self)
         theme.center_window(win)
         win.title("Censurar zona")

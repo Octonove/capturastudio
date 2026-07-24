@@ -121,7 +121,7 @@ class PolishPanel(ttk.LabelFrame):
         self._set_step2_enabled(True)
 
     def _add_region(self) -> None:
-        r = self.app._ask_region()
+        r = self.app._ask_region(self.source_video)
         if r:
             self.regions.append(r)
             self.var_priv.set(True)
