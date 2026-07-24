@@ -1636,6 +1636,7 @@ class App(tk.Tk):
         ia.add_command(label="Control de calidad (auto-auditoria)…", command=self._ai_quality)
         ia.add_separator()
         ia.add_command(label="Generar paquete de contenido…", command=self._ai_content_package)
+        ia.add_command(label="Exportar a GIF…", command=self._ai_export_gif)
         ia.add_command(label="Escudo de privacidad (censurar zona)…", command=self._ai_privacy)
         ia.add_command(label="Foco de ventana (oscurecer el resto)…", command=self._ai_focus)
         ia.add_command(label="Quitar fondo de una imagen (IA)…", command=self._ai_remove_bg)
@@ -2543,6 +2544,90 @@ class App(tk.Tk):
         bar.pack(pady=14)
         ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
         ttk.Button(bar, text="Generar", style="Primary.TButton", command=ok).pack(side="left", padx=6)
+        win.wait_window()
+        return res or None
+
+    def _ai_export_gif(self) -> None:
+        if not self.ffmpeg:
+            return
+        video = self._pick_video("Elige el video para exportar a GIF")
+        if not video:
+            return
+        total = ai_post.get_duration(self.ffmpeg, video) or 0.0
+        opts = self._ask_gif_options(total)
+        if not opts:
+            return
+        out = filedialog.asksaveasfilename(
+            title="Guardar GIF como…", defaultextension=".gif",
+            initialfile=Path(video).stem + ".gif",
+            initialdir=str(Path(video).parent),
+            filetypes=[("GIF", "*.gif")]) or None
+        if not out:
+            return
+
+        def work():
+            content_factory.to_gif(self.ffmpeg, video, out, start=opts["start"],
+                                   dur=opts["dur"], width=opts["width"], fps=opts["fps"])
+            return out
+        self._run_with_progress("Exportando a GIF…", work,
+                                lambda r: f"GIF guardado:\n{r}")
+
+    def _ask_gif_options(self, total: float) -> dict | None:
+        win = tk.Toplevel(self)
+        theme.center_window(win)
+        win.title("Exportar a GIF")
+        win.transient(self)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Exportar el video a GIF", style="H.TLabel").pack(padx=20, pady=(16, 4))
+        if total > 0:
+            ttk.Label(win, text=f"Duracion del video: {total:.1f} s",
+                      style="Muted.TLabel").pack(padx=20)
+        grid = ttk.Frame(win)
+        grid.pack(padx=20, pady=10)
+        var_start = tk.StringVar(value="0")
+        var_dur = tk.StringVar(value=(f"{total:.1f}" if total > 0 else ""))
+        var_w = tk.StringVar(value="640")
+        var_fps = tk.StringVar(value="12")
+        rows = [("Desde (s):", var_start, None),
+                ("Duracion (s):", var_dur, None),
+                ("Ancho (px):", var_w, ["480", "640", "800", "1024"]),
+                ("FPS:", var_fps, ["8", "10", "12", "15", "20"])]
+        for i, (lbl, var, choices) in enumerate(rows):
+            ttk.Label(grid, text=lbl).grid(row=i, column=0, sticky="w", pady=3, padx=(0, 8))
+            if choices:
+                ttk.Combobox(grid, textvariable=var, values=choices, width=8,
+                             state="readonly").grid(row=i, column=1, sticky="w")
+            else:
+                ttk.Entry(grid, textvariable=var, width=10).grid(row=i, column=1, sticky="w")
+        ttk.Label(win, text="Deja 'Duracion' con el total para el video entero.\n"
+                  "Los GIF pesan: para clips largos baja el ancho o los fps.",
+                  style="Muted.TLabel", justify="left").pack(padx=20, pady=(0, 6))
+        res: dict = {}
+
+        def _f(s, d):
+            try:
+                return max(0.0, float(str(s).replace(",", ".")))
+            except (TypeError, ValueError):
+                return d
+
+        def _i(s, d):
+            try:
+                return max(1, int(float(s)))
+            except (TypeError, ValueError):
+                return d
+
+        def ok():
+            dur = _f(var_dur.get(), total or 4.0)
+            if dur <= 0:
+                dur = total or 4.0
+            res.update({"start": _f(var_start.get(), 0.0), "dur": dur,
+                        "width": _i(var_w.get(), 640), "fps": _i(var_fps.get(), 12)})
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=14)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Exportar", style="Primary.TButton", command=ok).pack(side="left", padx=6)
         win.wait_window()
         return res or None
 
