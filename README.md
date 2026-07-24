@@ -57,6 +57,19 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
   solo pegas tu *stream key*.
 - Audio en vivo, **grabación de VOD** simultánea (.mkv) y **reconexión** automática.
 
+### 🎬 Editor de vídeo con línea de tiempo
+- Abre cualquier grabación (o vídeo importado) y edítala **sin salir de la app**:
+  **textos**, **imágenes**, **cuadros de color** (con opacidad) y **difuminados**
+  que se colocan **arrastrándolos sobre el vídeo** y se redimensionan con el ratón.
+- Cada elemento es una **barra en la línea de tiempo**: muévela o estira sus bordes
+  para decidir **cuándo aparece y desaparece**. Vista previa con el fotograma real.
+- **✂ Cortes**: marca tramos a eliminar; el resto se une solo. **Transiciones**
+  opcionales: fundido de entrada/salida y **fundido cruzado** en los cortes.
+- **Croma** para imágenes con fondo verde y blur con vista previa real difuminada.
+- Exporta todo en **una pasada** a un archivo nuevo: el original nunca se toca y
+  el audio se conserva. La selección de zonas a censurar (privacidad/foco/Docente)
+  también es **visual**: dibuja el rectángulo sobre un fotograma.
+
 ### Post-producción con IA local (el foso)
 - **Subtítulos automáticos** (Whisper) → `.srt`, opción de **quemarlos** y traducir a inglés.
 - **Recorte de silencios** (auto-jumpcut): un tutorial con pausas queda fluido en un clic.

@@ -60,12 +60,32 @@ class Overlay:
             return "T  " + t[:22]
         if self.kind == "image":
             return "🖼 " + Path(self.params.get("path", "")).name[:22]
+        if self.kind == "box":
+            return "▮  cuadro " + self.params.get("color", "")
         return "▒  difuminado"
 
 
 def _even(v: int) -> int:
     v = int(v)
     return v if v % 2 == 0 else v - 1
+
+
+def _chroma_preview(img: "Image.Image", color: str, thr: int = 100) -> "Image.Image":
+    """Aproximacion del chromakey para el LIENZO: hace transparentes los pixeles
+    cercanos al color clave. El export usa el filtro chromakey real de FFmpeg."""
+    try:
+        r0, g0, b0 = (int(color.lstrip("#")[j:j + 2], 16) for j in (0, 2, 4))
+    except (ValueError, IndexError):
+        return img
+    img = img.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    for yy in range(h):
+        for xx in range(w):
+            r, g, b, a = px[xx, yy]
+            if abs(r - r0) + abs(g - g0) + abs(b - b0) < thr:
+                px[xx, yy] = (r, g, b, 0)
+    return img
 
 
 def merge_ranges(ranges: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -99,9 +119,12 @@ def kept_segments(cuts: list[tuple[float, float]], duration: float) -> list[tupl
 def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
                      overlays: list[Overlay], cuts: list[tuple[float, float]],
                      out_path: str, *, encoder: str = "libx264",
-                     quality_key: str = "alta", with_audio: bool = True) -> list[str]:
-    """Comando FFmpeg de UNA pasada. Los overlays de texto deben traer ya su PNG
-    renderizado en params['png']; los de imagen usan params['path']."""
+                     quality_key: str = "alta", with_audio: bool = True,
+                     crossfade: float = 0.0, fade_inout: float = 0.0) -> list[str]:
+    """Comando FFmpeg de UNA pasada. Los overlays de texto/cuadro deben traer ya su
+    PNG renderizado en params['png']; los de imagen usan params['path'].
+    crossfade: fundido cruzado (s) al unir los tramos conservados tras los cortes.
+    fade_inout: fundido desde/hacia negro (s) al principio y final del resultado."""
     inputs: list[str] = ["-i", video]
     idx = 1
     parts: list[str] = []
@@ -131,39 +154,82 @@ def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
             parts.append(f"[e{k}b]crop={w}:{h}:{x}:{y},{eff}[e{k}f]")
             parts.append(f"[e{k}a][e{k}f]overlay={x}:{y}{enable}[o{k}]")
         else:
-            src = ov.params.get("png") if ov.kind == "text" else ov.params.get("path")
+            src = (ov.params.get("path") if ov.kind == "image"
+                   else ov.params.get("png"))
             if not src or not Path(src).is_file():
                 continue
             w = max(2, _even(min(ov.w, vw)))
             h = max(2, _even(min(ov.h, vh)))
             inputs += ["-loop", "1", "-i", str(src)]
-            parts.append(f"[{idx}:v]format=rgba,scale={w}:{h}[L{k}]")
-            parts.append(f"{cur}[L{k}]overlay={int(ov.x)}:{int(ov.y)}{enable}[o{k}]")
+            # croma opcional (imagenes con fondo verde): mismo filtro que la escena
+            ck = fu.safe_color(ov.params.get("chroma")) if ov.params.get("chroma") else None
+            chroma = f",chromakey={ck}:0.30:0.08" if ck else ""
+            parts.append(f"[{idx}:v]format=rgba{chroma},scale={w}:{h}[L{k}]")
+            # shortest=1: la imagen entra con -loop 1 (infinita); sin esto, un export
+            # SIN cortes no termina nunca (el grafo sigue vivo tras acabar el video).
+            parts.append(f"{cur}[L{k}]overlay={int(ov.x)}:{int(ov.y)}:shortest=1"
+                         f"{enable}[o{k}]")
             idx += 1
         cur = f"[o{k}]"
 
     kept = kept_segments(cuts, duration)
     cutting = cuts and kept and kept != [(0.0, duration)]
+    out_dur = duration
     if cutting:
         n = len(kept)
+        lens = [e - s for s, e in kept]
+        # fundido cruzado: acotado para que quepa en el tramo mas corto
+        xf = min(float(crossfade), min(lens) / 2.5) if crossfade > 0 and n >= 2 else 0.0
+        if xf < 0.1:
+            xf = 0.0
         parts.append(cur + f"split={n}" + "".join(f"[sv{j}]" for j in range(n)))
         if with_audio:
             parts.append(f"[0:a]asplit={n}" + "".join(f"[sa{j}]" for j in range(n)))
-        lab = ""
         for j, (s, e) in enumerate(kept):
             parts.append(f"[sv{j}]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{j}]")
-            lab += f"[v{j}]"
             if with_audio:
                 parts.append(f"[sa{j}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{j}]")
-                lab += f"[a{j}]"
-        parts.append(f"{lab}concat=n={n}:v=1:a={1 if with_audio else 0}[vout]"
-                     + ("[aout]" if with_audio else ""))
-        maps = ["-map", "[vout]"] + (["-map", "[aout]"] if with_audio else [])
+        if xf > 0.0:
+            # cadena de xfade/acrossfade: cada union resta xf al total
+            cur_v, acc = "[v0]", lens[0]
+            cur_a = "[a0]"
+            for j in range(1, n):
+                parts.append(f"{cur_v}[v{j}]xfade=transition=fade:duration={xf:.3f}"
+                             f":offset={acc - xf:.3f}[xv{j}]")
+                cur_v = f"[xv{j}]"
+                if with_audio:
+                    parts.append(f"{cur_a}[a{j}]acrossfade=d={xf:.3f}[xa{j}]")
+                    cur_a = f"[xa{j}]"
+                acc += lens[j] - xf
+            out_dur = acc
+            vout, aout = cur_v, (cur_a if with_audio else None)
+        else:
+            lab = "".join(f"[v{j}]" + (f"[a{j}]" if with_audio else "") for j in range(n))
+            parts.append(f"{lab}concat=n={n}:v=1:a={1 if with_audio else 0}[vcat]"
+                         + ("[acat]" if with_audio else ""))
+            out_dur = sum(lens)
+            vout, aout = "[vcat]", ("[acat]" if with_audio else None)
     else:
-        if parts:
-            maps = ["-map", cur] + (["-map", "0:a"] if with_audio else [])
-        else:   # sin overlays ni cortes: re-encode directo
-            maps = ["-map", "0:v"] + (["-map", "0:a"] if with_audio else [])
+        vout, aout = cur, ("0:a" if with_audio else None)
+
+    fi = min(float(fade_inout), max(0.0, out_dur / 3))
+    if fi >= 0.1:
+        st = max(0.0, out_dur - fi)
+        parts.append(f"{vout if vout.startswith('[') else '[0:v]'}"
+                     f"fade=t=in:st=0:d={fi:.3f},fade=t=out:st={st:.3f}:d={fi:.3f}[vfad]")
+        vout = "[vfad]"
+        if with_audio:
+            src_a = aout if aout and aout.startswith("[") else "[0:a]"
+            parts.append(f"{src_a}afade=t=in:st=0:d={fi:.3f},"
+                         f"afade=t=out:st={st:.3f}:d={fi:.3f}[afad]")
+            aout = "[afad]"
+
+    if parts:
+        maps = ["-map", vout if vout.startswith("[") else "0:v"]
+        if with_audio:
+            maps += ["-map", aout if aout else "0:a"]
+    else:   # sin overlays, cortes ni fundidos: re-encode directo
+        maps = ["-map", "0:v"] + (["-map", "0:a"] if with_audio else [])
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"] + inputs
     if parts:
@@ -288,8 +354,10 @@ class EditorWindow(tk.Toplevel):
         bar.pack(fill="x")
         ttk.Button(bar, text="＋ Texto", command=self._add_text).pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="＋ Imagen", command=self._add_image).pack(side="left", padx=6)
+        ttk.Button(bar, text="＋ Cuadro", command=self._add_box).pack(side="left", padx=6)
         ttk.Button(bar, text="＋ Difuminado", command=self._add_blur).pack(side="left", padx=6)
         ttk.Button(bar, text="✂ Cortar tramo", command=self._add_cut).pack(side="left", padx=6)
+        ttk.Button(bar, text="Croma verde", command=self._toggle_chroma).pack(side="left", padx=6)
         ttk.Button(bar, text="🗑 Eliminar", command=self._delete_sel).pack(side="left", padx=6)
         self.lbl_info = ttk.Label(bar, text="", style="Muted.TLabel")
         self.lbl_info.pack(side="left", padx=12)
@@ -311,6 +379,13 @@ class EditorWindow(tk.Toplevel):
         self.scale.pack(side="left", fill="x", expand=True)
         self.lbl_time = ttk.Label(srow, text="0:00.0", width=18)
         self.lbl_time.pack(side="left", padx=(8, 0))
+        # transiciones: se aplican al EXPORTAR (el lienzo no simula fundidos)
+        self.var_fade = tk.BooleanVar(value=False)
+        ttk.Checkbutton(srow, text="Fundido inicio/fin",
+                        variable=self.var_fade).pack(side="left", padx=(14, 4))
+        self.var_xfade = tk.BooleanVar(value=False)
+        ttk.Checkbutton(srow, text="Fundido en los cortes",
+                        variable=self.var_xfade).pack(side="left", padx=4)
 
         self.tl = tk.Canvas(self, bg=theme.SURFACE, highlightthickness=0, height=120)
         self.tl.pack(fill="x", padx=10, pady=(0, 4))
@@ -375,6 +450,19 @@ class EditorWindow(tk.Toplevel):
                 img = Image.open(png).convert("RGBA")
             elif ov.kind == "image":
                 img = Image.open(ov.params["path"]).convert("RGBA")
+                if ov.params.get("chroma"):
+                    img = _chroma_preview(img, ov.params["chroma"])
+            elif ov.kind == "box":
+                # PNG solido cacheado por color+opacidad (el export lo escala)
+                color = ov.params.get("color", "#1E3A5F")
+                alpha = max(5, min(100, int(ov.params.get("alpha", 100))))
+                r, g, b = (int(color.lstrip("#")[j:j + 2], 16) for j in (0, 2, 4))
+                png = work_dir() / f"_box_{color.lstrip('#')}_{alpha}.png"
+                if not png.is_file():
+                    Image.new("RGBA", (64, 64),
+                              (r, g, b, int(alpha * 255 / 100))).save(png)
+                ov.params["png"] = str(png)
+                img = Image.open(png).convert("RGBA")
         except (OSError, ValueError, KeyError) as exc:
             logger.warning("No se pudo cargar el overlay: %s", exc)
         self._ov_imgs[i] = img
@@ -448,7 +536,7 @@ class EditorWindow(tk.Toplevel):
             ov.y = int(max(-ov.h + 8, min(vy - dy, self.vh - 8)))
         else:
             neww = max(24, int(vx - ov.x))
-            if ov.kind == "blur":
+            if ov.kind in ("blur", "box"):    # alto libre; texto/imagen con aspecto
                 ov.w = neww
                 ov.h = max(24, int(vy - ov.y))
             else:
@@ -514,7 +602,8 @@ class EditorWindow(tk.Toplevel):
                 fill="#F3B0AA" if not selected else theme.PRIMARY,
                 outline=theme.PRIMARY, width=2 if selected else 1)
         # filas de overlays
-        colors = {"text": theme.NAVY, "image": theme.ACCENT, "blur": "#8A97A8"}
+        colors = {"text": theme.NAVY, "image": theme.ACCENT, "blur": "#8A97A8",
+                  "box": "#7A5EA8"}
         for r, (_kind, i) in enumerate(self._tl_rows()[1:], start=1):
             ov = self.overlays[i]
             y = self._row_y(r)
@@ -647,6 +736,35 @@ class EditorWindow(tk.Toplevel):
         self._refresh_canvas()
         self._refresh_tl()
 
+    def _add_box(self) -> None:
+        d = _BoxDialog(self)
+        if not d.result:
+            return
+        s, e = self._default_span()
+        w, h = _even(max(48, self.vw // 4)), _even(max(48, self.vh // 6))
+        ov = Overlay("box", (self.vw - w) // 2, int(self.vh * 0.66), w, h, s, e, d.result)
+        self.overlays.append(ov)
+        self.sel = ("ov", len(self.overlays) - 1)
+        self._sel_changed()
+        self._refresh_canvas()
+        self._refresh_tl()
+
+    def _toggle_chroma(self) -> None:
+        """Quita (o restaura) el fondo verde de la IMAGEN seleccionada."""
+        if not (self.sel and self.sel[0] == "ov" and self.sel[1] < len(self.overlays)):
+            messagebox.showinfo(APP_NAME, "Selecciona una imagen para quitar su fondo "
+                                "verde con croma.", parent=self)
+            return
+        i = self.sel[1]
+        ov = self.overlays[i]
+        if ov.kind != "image":
+            messagebox.showinfo(APP_NAME, "El croma se aplica a las imagenes anadidas "
+                                "(las que tengan fondo verde).", parent=self)
+            return
+        ov.params["chroma"] = None if ov.params.get("chroma") else "#00D000"
+        self._ov_imgs.pop(i, None)
+        self._refresh_canvas()
+
     def _add_blur(self) -> None:
         s, e = self._default_span()
         w, h = _even(max(48, self.vw // 4)), _even(max(48, self.vh // 5))
@@ -696,15 +814,17 @@ class EditorWindow(tk.Toplevel):
             filetypes=[("Video MP4", "*.mp4")]) or None
         if not out:
             return
-        # asegurar PNGs de texto renderizados
+        # asegurar PNGs de texto/cuadro renderizados
         for i, ov in enumerate(self.overlays):
-            if ov.kind == "text":
+            if ov.kind in ("text", "box"):
                 self._ov_image(i, ov)
         enc = fu.resolve_encoder(self.app.var_enc.get(), self.app.encoders, self.ffmpeg)
         cmd = build_export_cmd(
             self.ffmpeg, self.video, self.vw, self.vh, self.duration,
             list(self.overlays), list(self.cuts), out, encoder=enc,
-            quality_key=self.app.var_quality.get(), with_audio=self.with_audio)
+            quality_key=self.app.var_quality.get(), with_audio=self.with_audio,
+            crossfade=(0.5 if self.var_xfade.get() else 0.0),
+            fade_inout=(0.5 if self.var_fade.get() else 0.0))
 
         def work():
             run_export(cmd, out)
@@ -766,6 +886,48 @@ class _TextDialog:
         ttk.Button(bar, text="Anadir", style="Primary.TButton", command=ok).pack(
             side="left", padx=6)
         txt.focus_set()
+        win.wait_window()
+
+
+class _BoxDialog:
+    """Cuadro de color solido: color + opacidad. result = params del overlay."""
+
+    def __init__(self, parent):
+        self.result: dict | None = None
+        win = tk.Toplevel(parent)
+        theme.center_window(win)
+        win.title("Anadir cuadro de color")
+        win.transient(parent)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Cuadro de color (fondo para textos, franjas…)",
+                  style="H.TLabel").pack(padx=16, pady=(14, 8))
+        row = ttk.Frame(win)
+        row.pack(padx=16, pady=(0, 4))
+        color = {"c": "#1E3A5F"}
+        btn = tk.Button(row, text="Color", width=9, bg=color["c"], fg="#FFFFFF",
+                        command=lambda: pick())
+        btn.pack(side="left", padx=(0, 14))
+
+        def pick():
+            c = colorchooser.askcolor(color["c"], parent=win)
+            if c and c[1]:
+                color["c"] = c[1]
+                btn.config(bg=c[1])
+        ttk.Label(row, text="Opacidad %:").pack(side="left")
+        var_a = tk.IntVar(value=100)
+        ttk.Spinbox(row, from_=5, to=100, textvariable=var_a, width=5).pack(
+            side="left", padx=4)
+
+        def ok():
+            self.result = {"color": color["c"],
+                           "alpha": max(5, min(100, var_a.get()))}
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=12)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Anadir", style="Primary.TButton", command=ok).pack(
+            side="left", padx=6)
         win.wait_window()
 
 
