@@ -69,6 +69,10 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
 - **Escudo de privacidad** (difumina datos sensibles, incl. retroactivo) y **foco de
   ventana** (oscurece todo menos lo que explicas).
 - **Fábrica de contenido**: una grabación → vertical 9:16 + audio MP3 + SRT.
+- **Exportar a GIF**: convierte una grabación (el **vídeo completo** o un **tramo** a
+  elegir) en un **GIF optimizado** (paleta de 2 pasadas, buena calidad), con **ancho y
+  fps** ajustables — ideal para demos y previews. La grabación se guarda en MP4; el GIF
+  es una conversión en post.
 - Todo **offline y privado**: ni una palabra sale de tu PC.
 
 ### Atajos globales (remapeables)
