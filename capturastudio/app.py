@@ -2101,17 +2101,31 @@ class App(tk.Tk):
         panel = self._polish_panel
         if panel is None or not getattr(panel, "var_cursorzoom", None) or not panel.var_cursorzoom.get():
             return
+        # Region a seguir: se prefiere una fuente de PANTALLA; si no hay, se usa la
+        # primera fuente de VENTANA (su area cliente). Para la ventana el logger
+        # guarda coords relativas al cliente (hwnd), robusto a que la muevas.
         region = None
+        hwnd = None
+        win_region = None
+        win_hwnd = None
         for s in self.scene.visible_sorted():
             if s.kind == scn.KIND_SCREEN:
                 p = s.params
                 region = (int(p.get("left", 0)), int(p.get("top", 0)),
                           int(p.get("width", 1920)), int(p.get("height", 1080)))
                 break
+            if s.kind == scn.KIND_WINDOW and win_region is None:
+                wh = winlist.resolve_window(s.params)
+                rect = winlist.client_rect(wh) if wh else None
+                if rect:
+                    win_hwnd = wh
+                    win_region = (0, 0, rect[2], rect[3])   # coords cliente: (0,0,w,h)
+        if region is None and win_region is not None:
+            region, hwnd = win_region, win_hwnd
         if not region:
-            return   # sin captura de pantalla no hay nada a lo que seguir el cursor
+            return   # sin pantalla ni ventana capturable no hay a que seguir el cursor
         try:
-            self._cursor_logger = cursorzoom.MouseLogger()
+            self._cursor_logger = cursorzoom.MouseLogger(hwnd=hwnd)
             self._cursor_logger.start()
             self._cursor_region = region
         except Exception as exc:  # noqa: BLE001

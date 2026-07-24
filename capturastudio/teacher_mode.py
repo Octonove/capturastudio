@@ -66,7 +66,7 @@ class PolishPanel(ttk.LabelFrame):
         ttk.Checkbutton(cb, text="Auto-encuadre: seguirme", variable=self.var_autoframe).pack(anchor="w")
         # zoom al cursor: opcion de captura que el estudio aplica al grabar
         self.var_cursorzoom = tk.BooleanVar(value=False)
-        ttk.Checkbutton(cb, text="🔍 Zoom que sigue mi cursor",
+        ttk.Checkbutton(cb, text="🔍 Zoom que sigue mi cursor (marca antes de grabar)",
                         variable=self.var_cursorzoom).pack(anchor="w")
 
         cc = ttk.Frame(opts); cc.grid(row=0, column=2, sticky="nw", padx=(0, 22))

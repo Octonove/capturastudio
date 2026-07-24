@@ -23,14 +23,21 @@ class _POINT(ctypes.Structure):
 
 
 class MouseLogger:
-    """Hilo ligero que apunta (t_rel, x, y) de pantalla a ~20 Hz."""
+    """Hilo ligero que apunta (t_rel, x, y) a ~20 Hz.
 
-    def __init__(self, hz: float = 20.0):
+    Si se pasa `hwnd` (captura de VENTANA), las coordenadas se guardan RELATIVAS al
+    area cliente de esa ventana (via ScreenToClient), asi el zoom sigue al cursor
+    aunque muevas la ventana durante la grabacion. Sin hwnd (captura de PANTALLA),
+    se guardan las coordenadas de pantalla tal cual.
+    """
+
+    def __init__(self, hz: float = 20.0, hwnd: int | None = None):
         self._dt = 1.0 / max(5.0, hz)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.samples: list[tuple[float, int, int]] = []
         self._t0: float | None = None
+        self._hwnd = hwnd
 
     def start(self) -> None:
         self._t0 = time.monotonic()
@@ -40,12 +47,17 @@ class MouseLogger:
     def _run(self) -> None:
         try:
             user32 = ctypes.windll.user32
+            # HWND de 64 bits: sin argtypes, ctypes lo trataria como c_int y lo
+            # truncaria. c_void_p lo pasa entero.
+            user32.ScreenToClient.argtypes = [ctypes.c_void_p, ctypes.POINTER(_POINT)]
         except (AttributeError, OSError):
             return
         p = _POINT()
         while not self._stop.is_set():
             try:
                 if user32.GetCursorPos(ctypes.byref(p)):
+                    if self._hwnd and user32.ScreenToClient(self._hwnd, ctypes.byref(p)):
+                        pass   # p ahora esta en coords del area cliente de la ventana
                     self.samples.append((time.monotonic() - self._t0, int(p.x), int(p.y)))
             except OSError:
                 pass
