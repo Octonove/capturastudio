@@ -65,6 +65,13 @@ Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
   para decidir **cuándo aparece y desaparece**. Vista previa con el fotograma real.
 - **✂ Cortes**: marca tramos a eliminar; el resto se une solo. **Transiciones**
   opcionales: fundido de entrada/salida y **fundido cruzado** en los cortes.
+- **Insertar vídeos** en la línea de tiempo (una **intro**, un corte de relleno o un
+  **cierre**): se intercalan en el punto que elijas y admiten **tamaño proporcional**
+  (% del lienzo). Se normalizan solos aunque tengan otra resolución, fps o no lleven audio.
+- **Doble clic sobre cualquier elemento** abre sus ajustes (texto, color, opacidad,
+  intensidad del difuminado, imagen, escala del vídeo insertado…).
+- **Guardar el proyecto** (`.csedit`) para seguir editando otro día: conserva los
+  elementos, sus tiempos, los cortes, los vídeos insertados y las transiciones.
 - **Croma** para imágenes con fondo verde y blur con vista previa real difuminada.
 - Exporta todo en **una pasada** a un archivo nuevo: el original nunca se toca y
   el audio se conserva. La selección de zonas a censurar (privacidad/foco/Docente)

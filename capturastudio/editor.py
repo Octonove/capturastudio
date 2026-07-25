@@ -14,7 +14,9 @@ Todo se exporta en UNA pasada de FFmpeg a un archivo NUEVO (el original no se to
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import subprocess
 import threading
 from dataclasses import dataclass, field
@@ -63,6 +65,26 @@ class Overlay:
         if self.kind == "box":
             return "▮  cuadro " + self.params.get("color", "")
         return "▒  difuminado"
+
+
+@dataclass
+class Clip:
+    """Video INSERTADO en la linea principal (intro, corte de relleno, cierre).
+
+    A diferencia de un overlay, no se superpone: parte el video en `at` (segundo de
+    la linea de tiempo original) y se intercala ahi, alargando el resultado. `scale`
+    es el % del lienzo que ocupa (proporcional, centrado sobre negro): 100 = encaja
+    lo mas grande posible sin deformar.
+    """
+
+    path: str
+    at: float                    # punto de insercion en la linea original
+    duration: float = 0.0        # duracion real del clip (se lee al anadirlo)
+    scale: int = 100             # % del lienzo (10-100), siempre proporcional
+    has_audio: bool = True
+
+    def label(self) -> str:
+        return "🎞 " + Path(self.path).name[:22]
 
 
 def _even(v: int) -> int:
@@ -120,16 +142,47 @@ def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
                      overlays: list[Overlay], cuts: list[tuple[float, float]],
                      out_path: str, *, encoder: str = "libx264",
                      quality_key: str = "alta", with_audio: bool = True,
-                     crossfade: float = 0.0, fade_inout: float = 0.0) -> list[str]:
+                     crossfade: float = 0.0, fade_inout: float = 0.0,
+                     clips: list[Clip] | None = None, fps: int = 30) -> list[str]:
     """Comando FFmpeg de UNA pasada. Los overlays de texto/cuadro deben traer ya su
     PNG renderizado en params['png']; los de imagen usan params['path'].
-    crossfade: fundido cruzado (s) al unir los tramos conservados tras los cortes.
+    clips: videos INSERTADOS en la linea principal (intro/cierre/relleno).
+    crossfade: fundido cruzado (s) al unir las piezas (tramos y clips).
     fade_inout: fundido desde/hacia negro (s) al principio y final del resultado."""
+    # Las piezas se calculan ANTES que los overlays: si los cortes se comen todo el
+    # video principal (n_main == 0) no hay donde aplicarlos, y generar su cadena
+    # dejaria un pad de salida sin conectar -> FFmpeg aborta el export entero.
+    kept = kept_segments(cuts, duration)
+    cutting = bool(cuts) and kept != [(0.0, duration)]
+    clips_sorted = sorted(clips or [], key=lambda c: c.at)
+    use_pieces = cutting or bool(clips_sorted)
+    pieces: list[tuple] = []
+    if use_pieces:
+        ci = 0
+        for s, e in kept:
+            while ci < len(clips_sorted) and clips_sorted[ci].at <= s + 1e-6:
+                pieces.append(("clip", clips_sorted[ci]))
+                ci += 1
+            cs = s
+            while ci < len(clips_sorted) and clips_sorted[ci].at < e - 1e-6:
+                at = clips_sorted[ci].at
+                if at - cs > 0.05:
+                    pieces.append(("main", cs, at))
+                    cs = at
+                pieces.append(("clip", clips_sorted[ci]))
+                ci += 1
+            if e - cs > 0.05:
+                pieces.append(("main", cs, e))
+        while ci < len(clips_sorted):       # clips al final (cierre)
+            pieces.append(("clip", clips_sorted[ci]))
+            ci += 1
+    n_main = sum(1 for p in pieces if p[0] == "main") if use_pieces else 1
+
     inputs: list[str] = ["-i", video]
     idx = 1
     parts: list[str] = []
     cur = "[0:v]"
-    for k, ov in enumerate(overlays):
+    for k, ov in enumerate(overlays if n_main else []):
         s = max(0.0, float(ov.start))
         e = min(float(duration), float(ov.end))
         if e - s < 0.01:
@@ -143,7 +196,7 @@ def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
                 continue
             x, y, w, h = reg
             x, y, w, h = _even(x), _even(y), max(2, _even(w)), max(2, _even(h))
-            strength = int(ov.params.get("strength", 24))
+            strength = int(ov.params.get("strength") or 24)
             r = privacy_shield.safe_blur_radius(w, h, strength)
             if r >= 2:
                 eff = f"boxblur={r}:2"
@@ -172,39 +225,88 @@ def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
             idx += 1
         cur = f"[o{k}]"
 
-    kept = kept_segments(cuts, duration)
-    cutting = cuts and kept and kept != [(0.0, duration)]
+    # ---- piezas de la linea principal + clips insertados --------------------
     out_dur = duration
-    if cutting:
-        n = len(kept)
-        lens = [e - s for s, e in kept]
-        # fundido cruzado: acotado para que quepa en el tramo mas corto
+
+    if use_pieces:
+        # Con clips hay que NORMALIZAR (tamano, sar, fps, formato) para que concat
+        # y xfade acepten piezas de origenes distintos. Sin clips no se toca nada
+        # (el camino de solo-cortes queda exactamente como estaba).
+        nv = f",setsar=1,fps={fps},format=yuv420p" if clips_sorted else ""
+        na = (",aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+              if clips_sorted else "")
+
+        if n_main:
+            parts.append(cur + f"split={n_main}"
+                         + "".join(f"[sv{j}]" for j in range(n_main)))
+            if with_audio:
+                parts.append(f"[0:a]asplit={n_main}"
+                             + "".join(f"[sa{j}]" for j in range(n_main)))
+        seq: list[tuple[str, str | None, float]] = []
+        mj = 0
+        for pi, p in enumerate(pieces):
+            if p[0] == "main":
+                _, s, e = p
+                parts.append(f"[sv{mj}]trim=start={s:.3f}:end={e:.3f},"
+                             f"setpts=PTS-STARTPTS{nv}[pv{pi}]")
+                if with_audio:
+                    parts.append(f"[sa{mj}]atrim=start={s:.3f}:end={e:.3f},"
+                                 f"asetpts=PTS-STARTPTS{na}[pa{pi}]")
+                mj += 1
+                seq.append((f"[pv{pi}]", f"[pa{pi}]" if with_audio else None, e - s))
+            else:
+                clip: Clip = p[1]
+                if not Path(clip.path).is_file() or clip.duration <= 0.01:
+                    continue
+                # -t acota el clip a la duracion DECLARADA (la que usan out_dur y
+                # los offsets de xfade): si el archivo real fuese mas largo, el
+                # montaje se descuadraria (cola sobrante / fundido corrido).
+                inputs += ["-t", f"{float(clip.duration):.3f}", "-i", str(clip.path)]
+                vin = idx
+                idx += 1
+                sc = max(10, min(100, int(clip.scale)))
+                tw = max(2, _even(vw * sc // 100))
+                th = max(2, _even(vh * sc // 100))
+                # proporcional (decrease) y centrado sobre negro hasta el lienzo
+                parts.append(
+                    f"[{vin}:v]scale={tw}:{th}:force_original_aspect_ratio=decrease,"
+                    f"pad={vw}:{vh}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,fps={fps},"
+                    f"format=yuv420p,setpts=PTS-STARTPTS[pv{pi}]")
+                if with_audio:
+                    if clip.has_audio:
+                        parts.append(f"[{vin}:a]asetpts=PTS-STARTPTS{na}[pa{pi}]")
+                    else:   # clip mudo dentro de un montaje con audio: silencio
+                        inputs += ["-f", "lavfi", "-t", f"{clip.duration:.3f}",
+                                   "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
+                        parts.append(f"[{idx}:a]asetpts=PTS-STARTPTS{na}[pa{pi}]")
+                        idx += 1
+                seq.append((f"[pv{pi}]", f"[pa{pi}]" if with_audio else None,
+                            float(clip.duration)))
+
+        n = len(seq)
+        if n == 0:
+            raise EditorError("No queda nada que exportar (todo el video esta cortado).")
+        lens = [d for _, _, d in seq]
         xf = min(float(crossfade), min(lens) / 2.5) if crossfade > 0 and n >= 2 else 0.0
         if xf < 0.1:
             xf = 0.0
-        parts.append(cur + f"split={n}" + "".join(f"[sv{j}]" for j in range(n)))
-        if with_audio:
-            parts.append(f"[0:a]asplit={n}" + "".join(f"[sa{j}]" for j in range(n)))
-        for j, (s, e) in enumerate(kept):
-            parts.append(f"[sv{j}]trim=start={s:.3f}:end={e:.3f},setpts=PTS-STARTPTS[v{j}]")
-            if with_audio:
-                parts.append(f"[sa{j}]atrim=start={s:.3f}:end={e:.3f},asetpts=PTS-STARTPTS[a{j}]")
-        if xf > 0.0:
+        if n == 1:
+            vout, aout, out_dur = seq[0][0], seq[0][1], lens[0]
+        elif xf > 0.0:
             # cadena de xfade/acrossfade: cada union resta xf al total
-            cur_v, acc = "[v0]", lens[0]
-            cur_a = "[a0]"
+            cur_v, cur_a, acc = seq[0][0], seq[0][1], lens[0]
             for j in range(1, n):
-                parts.append(f"{cur_v}[v{j}]xfade=transition=fade:duration={xf:.3f}"
+                parts.append(f"{cur_v}{seq[j][0]}xfade=transition=fade:duration={xf:.3f}"
                              f":offset={acc - xf:.3f}[xv{j}]")
                 cur_v = f"[xv{j}]"
                 if with_audio:
-                    parts.append(f"{cur_a}[a{j}]acrossfade=d={xf:.3f}[xa{j}]")
+                    parts.append(f"{cur_a}{seq[j][1]}acrossfade=d={xf:.3f}[xa{j}]")
                     cur_a = f"[xa{j}]"
                 acc += lens[j] - xf
             out_dur = acc
             vout, aout = cur_v, (cur_a if with_audio else None)
         else:
-            lab = "".join(f"[v{j}]" + (f"[a{j}]" if with_audio else "") for j in range(n))
+            lab = "".join(v + (a or "") for v, a, _d in seq)
             parts.append(f"{lab}concat=n={n}:v=1:a={1 if with_audio else 0}[vcat]"
                          + ("[acat]" if with_audio else ""))
             out_dur = sum(lens)
@@ -240,6 +342,29 @@ def build_export_cmd(ffmpeg: str, video: str, vw: int, vh: int, duration: float,
         cmd += ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-movflags", "+faststart", out_path]
     return cmd
+
+
+def video_fps(ffmpeg: str, path: str, default: int = 30) -> int:
+    """FPS entero del video (para normalizar los clips insertados)."""
+    probe = fu.ffprobe_from(ffmpeg)
+    if probe:
+        try:
+            out = fu._decode(subprocess.run(
+                [probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                 "stream=r_frame_rate", "-of", "csv=p=0", path],
+                capture_output=True, timeout=20, **fu.subprocess_kwargs()).stdout).strip()
+            num, _, den = out.partition("/")
+            val = float(num) / float(den or 1)
+            if 1 <= val <= 240:
+                return int(round(val))
+        except (ValueError, ZeroDivisionError, OSError, subprocess.SubprocessError):
+            pass
+    return default
+
+
+def probe_clip(ffmpeg: str, path: str) -> tuple[float, bool]:
+    """(duracion, tiene_audio) de un video a insertar."""
+    return ai_post.get_duration(ffmpeg, path), has_audio_stream(ffmpeg, path)
 
 
 def run_export(cmd: list[str], out_path: str, timeout: int = 3600) -> None:
@@ -329,9 +454,12 @@ class EditorWindow(tk.Toplevel):
             raise EditorError("No se pudo leer el video (dimensiones o duracion).")
         self.with_audio = has_audio_stream(self.ffmpeg, video)
 
+        self.fps = video_fps(self.ffmpeg, video)
         self.overlays: list[Overlay] = []
         self.cuts: list[tuple[float, float]] = []
-        self.sel: tuple[str, int] | None = None     # ("ov"|"cut", indice)
+        self.clips: list[Clip] = []
+        self.project_path: str | None = None
+        self.sel: tuple[str, int] | None = None     # ("ov"|"cut"|"clip", indice)
         self.t = 0.0
         self._drag = None
         self._tl_drag = None
@@ -341,8 +469,8 @@ class EditorWindow(tk.Toplevel):
 
         self.title(f"Editor — {Path(video).name}")
         self.configure(bg=theme.BG)
-        self.geometry("1080x720")
-        self.minsize(860, 560)
+        self.geometry("1160x780")
+        self.minsize(900, 600)
         self.frames = FrameCache(self.ffmpeg, video)
         self._build()
         self.bind("<Delete>", lambda _e: self._delete_sel())
@@ -355,20 +483,33 @@ class EditorWindow(tk.Toplevel):
         ttk.Button(bar, text="＋ Texto", command=self._add_text).pack(side="left", padx=(0, 6))
         ttk.Button(bar, text="＋ Imagen", command=self._add_image).pack(side="left", padx=6)
         ttk.Button(bar, text="＋ Cuadro", command=self._add_box).pack(side="left", padx=6)
-        ttk.Button(bar, text="＋ Difuminado", command=self._add_blur).pack(side="left", padx=6)
-        ttk.Button(bar, text="✂ Cortar tramo", command=self._add_cut).pack(side="left", padx=6)
-        ttk.Button(bar, text="Croma verde", command=self._toggle_chroma).pack(side="left", padx=6)
-        ttk.Button(bar, text="🗑 Eliminar", command=self._delete_sel).pack(side="left", padx=6)
-        self.lbl_info = ttk.Label(bar, text="", style="Muted.TLabel")
-        self.lbl_info.pack(side="left", padx=12)
-        ttk.Button(bar, text="Exportar video…", style="Primary.TButton",
+        ttk.Button(bar, text="＋ Video", command=self._add_clip).pack(side="left", padx=6)
+        ttk.Button(bar, text="＋ Blur", command=self._add_blur).pack(side="left", padx=6)
+        ttk.Button(bar, text="✂ Cortar", command=self._add_cut).pack(side="left", padx=6)
+        ttk.Button(bar, text="🗑", width=3,
+                   command=self._delete_sel).pack(side="left", padx=6)
+
+        bar2 = ttk.Frame(self, padding=(10, 0))
+        bar2.pack(fill="x")
+        ttk.Button(bar2, text="📂 Abrir proyecto…",
+                   command=self._open_project).pack(side="left", padx=(0, 6))
+        ttk.Button(bar2, text="💾 Guardar proyecto",
+                   command=self._save_project).pack(side="left", padx=6)
+        ttk.Button(bar2, text="⚙ Ajustes (doble clic)",
+                   command=self._edit_sel).pack(side="left", padx=6)
+        ttk.Button(bar2, text="Croma verde",
+                   command=self._toggle_chroma).pack(side="left", padx=6)
+        ttk.Button(bar2, text="Exportar video…", style="Primary.TButton",
                    command=self._export).pack(side="right")
+        self.lbl_info = ttk.Label(bar2, text="", style="Muted.TLabel")
+        self.lbl_info.pack(side="left", padx=10)
 
         self.cv = tk.Canvas(self, bg="#0B1118", highlightthickness=0)
         self.cv.pack(fill="both", expand=True, padx=10)
         self.cv.bind("<ButtonPress-1>", self._cv_press)
         self.cv.bind("<B1-Motion>", self._cv_drag)
         self.cv.bind("<ButtonRelease-1>", self._cv_release)
+        self.cv.bind("<Double-Button-1>", self._on_double)
         self.cv.bind("<Configure>", lambda _e: self._refresh_canvas())
 
         srow = ttk.Frame(self, padding=(10, 4))
@@ -392,6 +533,7 @@ class EditorWindow(tk.Toplevel):
         self.tl.bind("<ButtonPress-1>", self._tl_press)
         self.tl.bind("<B1-Motion>", self._tl_motion)
         self.tl.bind("<ButtonRelease-1>", lambda _e: setattr(self, "_tl_drag", None))
+        self.tl.bind("<Double-Button-1>", self._on_double)
         self.tl.bind("<Configure>", lambda _e: self._refresh_tl())
 
         self.status = ttk.Label(self, text=self._status_base(), style="Muted.TLabel",
@@ -401,7 +543,8 @@ class EditorWindow(tk.Toplevel):
     def _status_base(self) -> str:
         au = "con audio" if self.with_audio else "SIN audio"
         return (f"{self.vw}x{self.vh} · {self._fmt(self.duration)} · {au} — arrastra los "
-                "elementos en el lienzo; en la linea de tiempo muevelos o estira sus bordes.")
+                "elementos en el lienzo; en la linea de tiempo muevelos o estira sus "
+                "bordes; doble clic = ajustes.")
 
     @staticmethod
     def _fmt(t: float) -> str:
@@ -436,9 +579,12 @@ class EditorWindow(tk.Toplevel):
         return ov.start - 0.001 <= self.t <= ov.end + 0.001
 
     def _ov_image(self, i: int, ov: Overlay) -> Image.Image | None:
-        """Imagen fuente (RGBA) del overlay i, cacheada."""
-        if i in self._ov_imgs:
-            return self._ov_imgs[i]
+        """Imagen fuente (RGBA) del overlay, cacheada POR IDENTIDAD del overlay: con
+        indices, al borrar uno los demas se desplazan y el cache servia la imagen de
+        otro. Los fallos NO se cachean (asi un fallo transitorio se reintenta)."""
+        key = id(ov)
+        if key in self._ov_imgs:
+            return self._ov_imgs[key]
         img = None
         try:
             if ov.kind == "text":
@@ -463,9 +609,11 @@ class EditorWindow(tk.Toplevel):
                               (r, g, b, int(alpha * 255 / 100))).save(png)
                 ov.params["png"] = str(png)
                 img = Image.open(png).convert("RGBA")
-        except (OSError, ValueError, KeyError) as exc:
-            logger.warning("No se pudo cargar el overlay: %s", exc)
-        self._ov_imgs[i] = img
+        except Exception as exc:   # noqa: BLE001  params corruptos/None no deben
+            logger.warning("No se pudo cargar el overlay: %s", exc)   # tumbar el lienzo
+            img = None
+        if img is not None:
+            self._ov_imgs[key] = img
         return img
 
     def _refresh_canvas(self) -> None:
@@ -483,7 +631,7 @@ class EditorWindow(tk.Toplevel):
                     x, y, w, h = reg
                     crop = base.crop((x, y, x + w, y + h))
                     rad = max(2, privacy_shield.safe_blur_radius(
-                        w, h, int(ov.params.get("strength", 24))))
+                        w, h, int(ov.params.get("strength") or 24)))
                     base.paste(crop.filter(ImageFilter.BoxBlur(rad)), (x, y))
             else:
                 src = self._ov_image(i, ov)
@@ -509,20 +657,30 @@ class EditorWindow(tk.Toplevel):
     def _cv_press(self, ev) -> None:
         ox, oy, sc = self._pv_rect()
         vx, vy = (ev.x - ox) / sc, (ev.y - oy) / sc
-        for i in range(len(self.overlays) - 1, -1, -1):
-            ov = self.overlays[i]
-            if not (self._active(ov) or (self.sel == ("ov", i))):
-                continue
-            if ov.x <= vx <= ov.x + ov.w and ov.y <= vy <= ov.y + ov.h:
-                self.sel = ("ov", i)
-                near = (abs(vx - (ov.x + ov.w)) < HANDLE_PX / sc
-                        and abs(vy - (ov.y + ov.h)) < HANDLE_PX / sc)
-                self._drag = ("resize" if near else "move", i, vx - ov.x, vy - ov.y)
-                self._sel_changed()
-                return
+        # Primero los VISIBLES en este instante (de arriba abajo) y solo despues el
+        # seleccionado aunque no este activo: si no, un elemento invisible pero
+        # seleccionado robaria el clic a los que si se ven.
+        for only_active in (True, False):
+            for i in range(len(self.overlays) - 1, -1, -1):
+                ov = self.overlays[i]
+                if only_active and not self._active(ov):
+                    continue
+                if not only_active and not (self.sel == ("ov", i)):
+                    continue
+                if ov.x <= vx <= ov.x + ov.w and ov.y <= vy <= ov.y + ov.h:
+                    self.sel = ("ov", i)
+                    near = (abs(vx - (ov.x + ov.w)) < HANDLE_PX / sc
+                            and abs(vy - (ov.y + ov.h)) < HANDLE_PX / sc)
+                    self._drag = ("resize" if near else "move", i, vx - ov.x, vy - ov.y)
+                    self._sel_changed()
+                    self._refresh_canvas()
+                    self._refresh_tl()
+                    return
         self.sel = None
         self._drag = None
         self._sel_changed()
+        self._refresh_canvas()      # sin esto quedaba el marco de seleccion fantasma
+        self._refresh_tl()
 
     def _cv_drag(self, ev) -> None:
         if not self._drag:
@@ -549,6 +707,7 @@ class EditorWindow(tk.Toplevel):
 
     def _cv_release(self, _ev) -> None:
         self._drag = None
+        self._refresh_canvas()
         self._refresh_tl()
 
     # ----------------------------------------------------- linea de tiempo
@@ -567,8 +726,9 @@ class EditorWindow(tk.Toplevel):
         return max(0.0, min(self.duration, (x - left) / tw * self.duration))
 
     def _tl_rows(self) -> list[tuple[str, int]]:
-        """Filas: ('cut', -1) fija + una por overlay."""
-        return [("cut", -1)] + [("ov", i) for i in range(len(self.overlays))]
+        """Filas: cortes y clips (fijas) + una por overlay."""
+        return ([("cut", -1), ("clip", -1)]
+                + [("ov", i) for i in range(len(self.overlays))])
 
     def _row_y(self, r: int) -> int:
         return self._TL_RULER + 6 + r * (self._TL_ROW + self._TL_GAP)
@@ -601,10 +761,25 @@ class EditorWindow(tk.Toplevel):
                 self._t2x(s), y, self._t2x(e), y + self._TL_ROW,
                 fill="#F3B0AA" if not selected else theme.PRIMARY,
                 outline=theme.PRIMARY, width=2 if selected else 1)
+        # fila de clips insertados (intro/relleno/cierre)
+        y = self._row_y(1)
+        self.tl.create_text(left, y + self._TL_ROW / 2, anchor="w", text="🎞",
+                            fill=theme.MUTED, font=(theme.FONT, 8))
+        for j, cl in enumerate(self.clips):
+            selected = self.sel == ("clip", j)
+            x0 = self._t2x(cl.at)
+            # ancho proporcional a su duracion (aprox: se INSERTA, no ocupa el original)
+            x1 = x0 + max(12.0, (cl.duration / max(0.1, self.duration)) * tw)
+            self.tl.create_rectangle(x0, y, x1, y + self._TL_ROW, fill="#3E8E6E",
+                                     outline=theme.PRIMARY if selected else theme.BORDER,
+                                     width=2 if selected else 1)
+            self.tl.create_text(x0 + 5, y + self._TL_ROW / 2, anchor="w",
+                                text=cl.label(), fill="#FFFFFF", font=(theme.FONT, 8),
+                                width=max(20, x1 - x0 - 8))
         # filas de overlays
         colors = {"text": theme.NAVY, "image": theme.ACCENT, "blur": "#8A97A8",
                   "box": "#7A5EA8"}
-        for r, (_kind, i) in enumerate(self._tl_rows()[1:], start=1):
+        for r, (_kind, i) in enumerate(self._tl_rows()[2:], start=2):
             ov = self.overlays[i]
             y = self._row_y(r)
             selected = self.sel == ("ov", i)
@@ -626,11 +801,22 @@ class EditorWindow(tk.Toplevel):
             y = self._row_y(r)
             if not (y <= ev.y <= y + self._TL_ROW):
                 continue
-            items = ([(j, s, e) for j, (s, e) in enumerate(self.cuts)] if kind == "cut"
-                     else [(i, self.overlays[i].start, self.overlays[i].end)])
+            if kind == "cut":
+                items = list(enumerate(self.cuts))
+                items = [(j, s, e) for j, (s, e) in reversed(items)]
+            elif kind == "clip":
+                # el clip se mueve entero (su duracion es fija): solo zona 'm'
+                _left, tw = self._tl_geom()
+                items = [(j, cl.at, self._x2t(self._t2x(cl.at) + max(
+                    12.0, (cl.duration / max(0.1, self.duration)) * tw)))
+                    for j, cl in reversed(list(enumerate(self.clips)))]
+            else:
+                items = [(i, self.overlays[i].start, self.overlays[i].end)]
             for j, s, e in items:
                 x0, x1 = self._t2x(s), self._t2x(e)
                 if x0 - EDGE_PX <= ev.x <= x1 + EDGE_PX:
+                    if kind == "clip":
+                        return (kind, j, "m")
                     zone = ("l" if abs(ev.x - x0) <= EDGE_PX
                             else "r" if abs(ev.x - x1) <= EDGE_PX else "m")
                     return (kind, j, zone)
@@ -641,8 +827,12 @@ class EditorWindow(tk.Toplevel):
         if hit:
             kind, j, zone = hit
             self.sel = (kind, j)
-            s, e = ((self.cuts[j]) if kind == "cut"
-                    else (self.overlays[j].start, self.overlays[j].end))
+            if kind == "cut":
+                s, e = self.cuts[j]
+            elif kind == "clip":
+                s = e = self.clips[j].at
+            else:
+                s, e = self.overlays[j].start, self.overlays[j].end
             self._tl_drag = (kind, j, zone, self._x2t(ev.x), s, e)
             self._sel_changed()
             self._refresh_tl()
@@ -662,6 +852,11 @@ class EditorWindow(tk.Toplevel):
             self._on_scrub()
             return
         dt = self._x2t(ev.x) - t0
+        if kind == "clip":      # el clip solo cambia su PUNTO de insercion
+            self.clips[j].at = max(0.0, min(s0 + dt, self.duration))
+            self._refresh_tl()
+            self._sel_changed()
+            return
         s, e = s0, e0
         if zone == "m":
             span = e0 - s0
@@ -686,11 +881,20 @@ class EditorWindow(tk.Toplevel):
         elif self.sel and self.sel[0] == "cut" and self.sel[1] < len(self.cuts):
             s, e = self.cuts[self.sel[1]]
             self.lbl_info.config(text=f"✂ corte   {self._fmt(s)} → {self._fmt(e)}")
+        elif self.sel and self.sel[0] == "clip" and self.sel[1] < len(self.clips):
+            cl = self.clips[self.sel[1]]
+            self.lbl_info.config(
+                text=f"{cl.label()}   se inserta en {self._fmt(cl.at)}   "
+                     f"({cl.duration:.1f}s, {cl.scale}%)")
         else:
             self.lbl_info.config(text="")
 
     def _default_span(self) -> tuple[float, float]:
-        return self.t, min(self.duration, self.t + max(3.0, self.duration * 0.15))
+        # cerca del final, el tramo se ancla hacia atras: un span de 0 s se veria en
+        # el editor pero el export lo descartaria en silencio.
+        span = max(MIN_DUR, min(max(3.0, self.duration * 0.15), self.duration))
+        s = min(self.t, max(0.0, self.duration - span))
+        return s, min(self.duration, s + span)
 
     def _add_text(self) -> None:
         d = _TextDialog(self)
@@ -749,6 +953,253 @@ class EditorWindow(tk.Toplevel):
         self._refresh_canvas()
         self._refresh_tl()
 
+    def _add_clip(self) -> None:
+        """Inserta un video (intro, relleno o cierre) en el punto actual."""
+        p = filedialog.askopenfilename(
+            title="Elige el video a insertar", parent=self,
+            initialdir=str(Path(self.video).parent),
+            filetypes=[("Video", "*.mp4 *.mkv *.mov *.webm *.avi")])
+        if not p:
+            return
+        try:
+            dur, has_a = probe_clip(self.ffmpeg, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("No se pudo leer el clip: %s", exc)
+            dur, has_a = 0.0, False
+        if dur <= 0.01:
+            messagebox.showinfo(APP_NAME, "No se pudo leer ese video.", parent=self)
+            return
+        self.clips.append(Clip(p, at=self.t, duration=dur, scale=100, has_audio=has_a))
+        self.sel = ("clip", len(self.clips) - 1)
+        self._sel_changed()
+        self._refresh_tl()
+
+    # ------------------------------------------------------- editar elemento
+    def _on_double(self, ev) -> None:
+        """Doble clic: selecciona lo que hay bajo el cursor y abre sus ajustes."""
+        if ev.widget is self.tl:
+            hit = self._tl_hit(ev)
+            if not hit:          # doble clic en zona vacia: no abrir nada
+                return
+            self.sel = (hit[0], hit[1])
+            self._tl_drag = None
+        else:
+            self._cv_press(ev)
+            self._drag = None
+            if not self.sel:
+                return
+        self._sel_changed()
+        self._edit_sel()
+
+    def _edit_sel(self) -> None:
+        """Abre el dialogo de ajustes del elemento seleccionado."""
+        if not self.sel:
+            messagebox.showinfo(APP_NAME, "Selecciona antes un elemento (en el lienzo o "
+                                "en la linea de tiempo).", parent=self)
+            return
+        kind, j = self.sel
+        if kind == "cut":
+            messagebox.showinfo(APP_NAME, "Un corte se ajusta moviendo o estirando su "
+                                "barra en la linea de tiempo.", parent=self)
+            return
+        if kind == "clip":
+            if j >= len(self.clips):
+                return
+            d = _ClipDialog(self, self.clips[j], self.duration)
+            if d.result:
+                cl = self.clips[j]
+                cl.scale = d.result["scale"]
+                cl.at = d.result["at"]
+                self._refresh_tl()
+                self._sel_changed()
+            return
+        if j >= len(self.overlays):
+            return
+        ov = self.overlays[j]
+        changed = False
+        if ov.kind == "text":
+            d = _TextDialog(self, initial=ov.params)
+            if d.result:
+                ov.params.update(d.result)
+                self._ov_imgs.pop(id(ov), None)
+                src = self._ov_image(j, ov)
+                if src is not None:      # re-ajusta el alto al nuevo texto/tamano
+                    ov.h = max(8, int(ov.w * src.height / max(1, src.width)))
+                changed = True
+        elif ov.kind == "box":
+            d = _BoxDialog(self, initial=ov.params)
+            if d.result:
+                ov.params.update(d.result)
+                self._ov_imgs.pop(id(ov), None)
+                changed = True
+        elif ov.kind == "blur":
+            d = _BlurDialog(self, ov.params)
+            if d.result:
+                ov.params.update(d.result)
+                changed = True
+        elif ov.kind == "image":
+            d = _ImageDialog(self, ov.params)
+            if d.result:
+                ov.params.update(d.result)
+                self._ov_imgs.pop(id(ov), None)
+                src = self._ov_image(j, ov)
+                if src is not None:
+                    ov.h = max(8, int(ov.w * src.height / max(1, src.width)))
+                changed = True
+        if changed:
+            self._refresh_canvas()
+            self._refresh_tl()
+            self._sel_changed()
+
+    # ---------------------------------------------------------- proyecto
+    def _to_project(self) -> dict:
+        return {
+            "app": APP_NAME, "version": 1, "video": self.video,
+            "fade_inout": bool(self.var_fade.get()),
+            "crossfade": bool(self.var_xfade.get()),
+            "cuts": [[float(s), float(e)] for s, e in self.cuts],
+            "clips": [{"path": c.path, "at": c.at, "duration": c.duration,
+                       "scale": c.scale, "has_audio": c.has_audio} for c in self.clips],
+            "overlays": [{"kind": o.kind, "x": o.x, "y": o.y, "w": o.w, "h": o.h,
+                          "start": o.start, "end": o.end,
+                          # el PNG de texto/cuadro se regenera al abrir (cache temporal)
+                          "params": {k: v for k, v in o.params.items() if k != "png"}}
+                         for o in self.overlays],
+        }
+
+    def _save_project(self) -> None:
+        p = self.project_path or filedialog.asksaveasfilename(
+            title="Guardar proyecto de edicion", parent=self,
+            defaultextension=".csedit", initialdir=str(Path(self.video).parent),
+            initialfile=Path(self.video).stem + ".csedit",
+            filetypes=[("Proyecto de edicion", "*.csedit")])
+        if not p:
+            return
+        # escritura ATOMICA: si algo falla a medias no se destruye el .csedit previo
+        tmp = Path(str(p) + ".tmp")
+        try:
+            tmp.write_text(json.dumps(self._to_project(), indent=1, ensure_ascii=False),
+                           encoding="utf-8")
+            os.replace(tmp, p)
+        except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            messagebox.showerror(APP_NAME, f"No se pudo guardar:\n{exc}", parent=self)
+            return
+        self.project_path = p
+        self._set_status_text(f"Proyecto guardado: {Path(p).name}")
+
+    def _open_project(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Abrir proyecto de edicion", parent=self,
+            initialdir=str(Path(self.video).parent),
+            filetypes=[("Proyecto de edicion", "*.csedit"), ("JSON", "*.json")])
+        if not p:
+            return
+        try:
+            data = json.loads(Path(p).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror(APP_NAME, f"No se pudo abrir el proyecto:\n{exc}",
+                                 parent=self)
+            return
+        # Validar que ES un proyecto ANTES de tocar la edicion actual: antes, un JSON
+        # cualquiera "se cargaba" con exito y dejaba el editor vacio.
+        if not isinstance(data, dict) or not any(
+                k in data for k in ("overlays", "cuts", "clips")):
+            messagebox.showerror(APP_NAME, "Ese archivo no es un proyecto de edicion de "
+                                 f"{APP_NAME}.", parent=self)
+            return
+        vid = data.get("video")
+        if isinstance(vid, str) and vid:
+            try:
+                distinto = Path(vid).resolve() != Path(self.video).resolve()
+            except (OSError, ValueError):
+                distinto = vid != self.video
+            if distinto and not messagebox.askyesno(
+                    APP_NAME, "Ese proyecto se guardo para otro video:\n"
+                    f"{Path(vid).name}\n\nSe cargaran igualmente los elementos sobre el "
+                    "video actual. ¿Continuar?", parent=self):
+                return
+        self.load_project(data)
+        self.project_path = p
+        self._set_status_text(f"Proyecto cargado: {Path(p).name}")
+
+    def load_project(self, data: dict) -> None:
+        """Sustituye la edicion actual por la del proyecto. Se construye TODO en
+        listas nuevas y solo al final se reemplaza el estado: si el proyecto viene
+        corrupto, la edicion actual no se pierde a medias. Los tiempos se acotan al
+        video actual y los clips se vuelven a sondear (su archivo pudo cambiar)."""
+        dur = self.duration
+        overlays: list[Overlay] = []
+        cuts: list[tuple[float, float]] = []
+        clips: list[Clip] = []
+        faltan: list[str] = []
+        for o in data.get("overlays") or []:
+            try:
+                if o.get("kind") not in ("text", "image", "box", "blur"):
+                    continue
+                params = {k: v for k, v in dict(o.get("params") or {}).items()
+                          if k != "png"}
+                s = max(0.0, min(float(o["start"]), dur))
+                e = max(s + MIN_DUR, min(float(o["end"]), dur))
+                ov = Overlay(o["kind"], int(o["x"]), int(o["y"]),
+                             max(2, int(o["w"])), max(2, int(o["h"])), s, e, params)
+                if ov.kind == "image" and not Path(params.get("path", "")).is_file():
+                    faltan.append(Path(params.get("path", "?")).name)
+                    continue          # sin archivo no se puede pintar ni exportar
+                overlays.append(ov)
+            except (KeyError, TypeError, ValueError):
+                continue
+        for c in data.get("cuts") or []:
+            try:
+                s = max(0.0, min(float(c[0]), dur))
+                e = max(0.0, min(float(c[1]), dur))
+                if e - s > 0.01:
+                    cuts.append((s, e))
+            except (IndexError, TypeError, ValueError):
+                continue
+        for c in data.get("clips") or []:
+            try:
+                path = str(c["path"])
+                if not Path(path).is_file():
+                    faltan.append(Path(path).name)
+                    continue
+                # re-sondear: si el archivo cambio, la duracion guardada descuadraria
+                # el montaje (out_dur y los offsets de los fundidos salen de aqui).
+                real_dur, real_audio = probe_clip(self.ffmpeg, path)
+                if real_dur <= 0.01:
+                    real_dur = float(c.get("duration") or 0.0)
+                    real_audio = bool(c.get("has_audio", True))
+                clips.append(Clip(path, max(0.0, min(float(c["at"]), dur)), real_dur,
+                                  int(c.get("scale", 100) or 100), bool(real_audio)))
+            except (KeyError, TypeError, ValueError):
+                continue
+        self.overlays, self.cuts, self.clips = overlays, cuts, clips
+        self._ov_imgs = {}
+        self._drag = self._tl_drag = None
+        try:
+            self.var_fade.set(bool(data.get("fade_inout")))
+            self.var_xfade.set(bool(data.get("crossfade")))
+        except tk.TclError:
+            pass
+        self.sel = None
+        self._sel_changed()
+        self._refresh_canvas()
+        self._refresh_tl()
+        if faltan:
+            messagebox.showwarning(
+                APP_NAME, "No se han encontrado estos archivos del proyecto, asi que "
+                "esos elementos no se han cargado:\n\n• " + "\n• ".join(faltan[:8])
+                + "\n\nSi los mueves de sitio, vuelve a anadirlos.", parent=self)
+
+    def _set_status_text(self, msg: str) -> None:
+        try:
+            self.status.config(text=f"{msg}   ·   {self._status_base()}")
+        except tk.TclError:
+            pass
+
     def _toggle_chroma(self) -> None:
         """Quita (o restaura) el fondo verde de la IMAGEN seleccionada."""
         if not (self.sel and self.sel[0] == "ov" and self.sel[1] < len(self.overlays)):
@@ -762,7 +1213,7 @@ class EditorWindow(tk.Toplevel):
                                 "(las que tengan fondo verde).", parent=self)
             return
         ov.params["chroma"] = None if ov.params.get("chroma") else "#00D000"
-        self._ov_imgs.pop(i, None)
+        self._ov_imgs.pop(id(ov), None)
         self._refresh_canvas()
 
     def _add_blur(self) -> None:
@@ -791,11 +1242,15 @@ class EditorWindow(tk.Toplevel):
         if not self.sel:
             return
         kind, j = self.sel
+        self._drag = None          # si no, seguir arrastrando lo borrado -> IndexError
+        self._tl_drag = None
         if kind == "ov" and j < len(self.overlays):
             self.overlays.pop(j)
             self._ov_imgs = {}   # los indices cambian: invalida el cache
         elif kind == "cut" and j < len(self.cuts):
             self.cuts.pop(j)
+        elif kind == "clip" and j < len(self.clips):
+            self.clips.pop(j)
         self.sel = None
         self._sel_changed()
         self._refresh_canvas()
@@ -803,9 +1258,9 @@ class EditorWindow(tk.Toplevel):
 
     # ------------------------------------------------------------- export
     def _export(self) -> None:
-        if not self.overlays and not self.cuts:
-            messagebox.showinfo(APP_NAME, "Anade un texto, imagen, difuminado o corte "
-                                "antes de exportar.", parent=self)
+        if not self.overlays and not self.cuts and not self.clips:
+            messagebox.showinfo(APP_NAME, "Anade un texto, imagen, video, difuminado o "
+                                "corte antes de exportar.", parent=self)
             return
         out = filedialog.asksaveasfilename(
             title="Exportar video como…", defaultextension=".mp4", parent=self,
@@ -814,17 +1269,40 @@ class EditorWindow(tk.Toplevel):
             filetypes=[("Video MP4", "*.mp4")]) or None
         if not out:
             return
-        # asegurar PNGs de texto/cuadro renderizados
+        # NUNCA sobrescribir el video de origen (ni un clip insertado): FFmpeg lo
+        # trunca al abrirlo para escribir y se perderia el original.
+        try:
+            dest = Path(out).resolve()
+            fuentes = [Path(self.video).resolve()] + [Path(c.path).resolve()
+                                                      for c in self.clips]
+        except (OSError, ValueError):
+            dest, fuentes = Path(out), []
+        if dest in fuentes:
+            messagebox.showerror(
+                APP_NAME, "Ese archivo es el video de origen (o uno de los videos "
+                "insertados). Elige otro nombre para no destruirlo.", parent=self)
+            return
+        # asegurar PNGs de texto/cuadro renderizados y avisar si falta algun recurso
+        faltan = []
         for i, ov in enumerate(self.overlays):
             if ov.kind in ("text", "box"):
                 self._ov_image(i, ov)
+            src = ov.params.get("path") if ov.kind == "image" else ov.params.get("png")
+            if ov.kind != "blur" and (not src or not Path(str(src)).is_file()):
+                faltan.append(ov.label())
+        if faltan and not messagebox.askyesno(
+                APP_NAME, "Estos elementos no tienen su archivo disponible y NO "
+                "apareceran en el video exportado:\n\n• " + "\n• ".join(faltan[:8])
+                + "\n\n¿Exportar de todos modos?", parent=self):
+            return
         enc = fu.resolve_encoder(self.app.var_enc.get(), self.app.encoders, self.ffmpeg)
         cmd = build_export_cmd(
             self.ffmpeg, self.video, self.vw, self.vh, self.duration,
             list(self.overlays), list(self.cuts), out, encoder=enc,
             quality_key=self.app.var_quality.get(), with_audio=self.with_audio,
             crossfade=(0.5 if self.var_xfade.get() else 0.0),
-            fade_inout=(0.5 if self.var_fade.get() else 0.0))
+            fade_inout=(0.5 if self.var_fade.get() else 0.0),
+            clips=list(self.clips), fps=self.fps)
 
         def work():
             run_export(cmd, out)
@@ -835,30 +1313,34 @@ class EditorWindow(tk.Toplevel):
 
 # --------------------------------------------------------------- dialogos
 class _TextDialog:
-    """Texto + tamano + color + fondo opcional. result = params del overlay."""
+    """Texto + tamano + color + fondo opcional. result = params del overlay.
+    Con `initial` sirve tambien para EDITAR un texto ya anadido."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, initial: dict | None = None):
         self.result: dict | None = None
+        ini = initial or {}
         win = tk.Toplevel(parent)
         theme.center_window(win)
-        win.title("Anadir texto")
+        win.title("Editar texto" if initial else "Anadir texto")
         win.transient(parent)
         win.resizable(False, False)
         win.grab_set()
         ttk.Label(win, text="Texto a mostrar", style="H.TLabel").pack(padx=16, pady=(14, 4))
         txt = tk.Text(win, width=42, height=3, font=(theme.FONT, 10))
         txt.pack(padx=16)
+        if ini.get("text"):
+            txt.insert("1.0", ini["text"])
         row = ttk.Frame(win)
         row.pack(padx=16, pady=(10, 0), fill="x")
         ttk.Label(row, text="Tamano:").pack(side="left")
-        var_size = tk.IntVar(value=48)
+        var_size = tk.IntVar(value=int(ini.get("size", 48)))
         ttk.Spinbox(row, from_=12, to=200, textvariable=var_size, width=5).pack(
             side="left", padx=(4, 14))
-        color = {"fg": "#FFFFFF", "bg": "#000000"}
+        color = {"fg": ini.get("color") or "#FFFFFF", "bg": ini.get("bg") or "#000000"}
         btn_fg = tk.Button(row, text="Color", width=7, bg=color["fg"],
                            command=lambda: pick("fg", btn_fg))
         btn_fg.pack(side="left", padx=4)
-        var_bg = tk.BooleanVar(value=True)
+        var_bg = tk.BooleanVar(value=(bool(ini.get("bg")) if initial else True))
         ttk.Checkbutton(row, text="Fondo", variable=var_bg).pack(side="left", padx=(12, 2))
         btn_bg = tk.Button(row, text="Color fondo", width=10, bg=color["bg"], fg="#FFFFFF",
                            command=lambda: pick("bg", btn_bg))
@@ -883,20 +1365,22 @@ class _TextDialog:
         bar = ttk.Frame(win)
         bar.pack(pady=12)
         ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
-        ttk.Button(bar, text="Anadir", style="Primary.TButton", command=ok).pack(
-            side="left", padx=6)
+        ttk.Button(bar, text="Guardar" if initial else "Anadir", style="Primary.TButton",
+                   command=ok).pack(side="left", padx=6)
         txt.focus_set()
         win.wait_window()
 
 
 class _BoxDialog:
-    """Cuadro de color solido: color + opacidad. result = params del overlay."""
+    """Cuadro de color solido: color + opacidad. result = params del overlay.
+    Con `initial` sirve tambien para EDITAR un cuadro ya anadido."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, initial: dict | None = None):
         self.result: dict | None = None
+        ini = initial or {}
         win = tk.Toplevel(parent)
         theme.center_window(win)
-        win.title("Anadir cuadro de color")
+        win.title("Editar cuadro" if initial else "Anadir cuadro de color")
         win.transient(parent)
         win.resizable(False, False)
         win.grab_set()
@@ -904,7 +1388,7 @@ class _BoxDialog:
                   style="H.TLabel").pack(padx=16, pady=(14, 8))
         row = ttk.Frame(win)
         row.pack(padx=16, pady=(0, 4))
-        color = {"c": "#1E3A5F"}
+        color = {"c": ini.get("color") or "#1E3A5F"}
         btn = tk.Button(row, text="Color", width=9, bg=color["c"], fg="#FFFFFF",
                         command=lambda: pick())
         btn.pack(side="left", padx=(0, 14))
@@ -915,7 +1399,7 @@ class _BoxDialog:
                 color["c"] = c[1]
                 btn.config(bg=c[1])
         ttk.Label(row, text="Opacidad %:").pack(side="left")
-        var_a = tk.IntVar(value=100)
+        var_a = tk.IntVar(value=int(ini.get("alpha", 100)))
         ttk.Spinbox(row, from_=5, to=100, textvariable=var_a, width=5).pack(
             side="left", padx=4)
 
@@ -926,7 +1410,123 @@ class _BoxDialog:
         bar = ttk.Frame(win)
         bar.pack(pady=12)
         ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
-        ttk.Button(bar, text="Anadir", style="Primary.TButton", command=ok).pack(
+        ttk.Button(bar, text="Guardar" if initial else "Anadir", style="Primary.TButton",
+                   command=ok).pack(side="left", padx=6)
+        win.wait_window()
+
+
+class _BlurDialog:
+    """Ajustes de un difuminado: intensidad."""
+
+    def __init__(self, parent, initial: dict):
+        self.result: dict | None = None
+        win = tk.Toplevel(parent)
+        theme.center_window(win)
+        win.title("Ajustes del difuminado")
+        win.transient(parent)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Intensidad del difuminado", style="H.TLabel").pack(
+            padx=16, pady=(14, 8))
+        var = tk.IntVar(value=int(initial.get("strength", 24)))
+        row = ttk.Frame(win)
+        row.pack(padx=16)
+        ttk.Scale(row, from_=4, to=60, variable=var, length=220).pack(side="left")
+        ttk.Spinbox(row, from_=4, to=60, textvariable=var, width=5).pack(side="left", padx=8)
+        ttk.Label(win, text="El tamano y la posicion se ajustan arrastrando en el lienzo.",
+                  style="Muted.TLabel").pack(padx=16, pady=(8, 0))
+
+        def ok():
+            self.result = {"strength": max(4, min(60, var.get()))}
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=12)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Guardar", style="Primary.TButton", command=ok).pack(
+            side="left", padx=6)
+        win.wait_window()
+
+
+class _ImageDialog:
+    """Ajustes de una imagen: archivo y croma."""
+
+    def __init__(self, parent, initial: dict):
+        self.result: dict | None = None
+        state = {"path": initial.get("path", "")}
+        win = tk.Toplevel(parent)
+        theme.center_window(win)
+        win.title("Ajustes de la imagen")
+        win.transient(parent)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Imagen", style="H.TLabel").pack(padx=16, pady=(14, 6))
+        lbl = ttk.Label(win, text=Path(state["path"]).name or "—", style="Muted.TLabel")
+        lbl.pack(padx=16)
+
+        def change():
+            p = filedialog.askopenfilename(
+                title="Elige la imagen", parent=win,
+                filetypes=[("Imagen", "*.png *.jpg *.jpeg *.webp *.bmp")])
+            if p:
+                state["path"] = p
+                lbl.config(text=Path(p).name)
+        ttk.Button(win, text="Cambiar imagen…", command=change).pack(pady=8)
+        var_ck = tk.BooleanVar(value=bool(initial.get("chroma")))
+        ttk.Checkbutton(win, text="Quitar fondo verde (croma)",
+                        variable=var_ck).pack(padx=16, pady=(0, 4))
+
+        def ok():
+            self.result = {"path": state["path"],
+                           "chroma": "#00D000" if var_ck.get() else None}
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=12)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Guardar", style="Primary.TButton", command=ok).pack(
+            side="left", padx=6)
+        win.wait_window()
+
+
+class _ClipDialog:
+    """Ajustes de un video insertado: tamano proporcional y punto de insercion."""
+
+    def __init__(self, parent, clip: "Clip", duration: float):
+        self.result: dict | None = None
+        win = tk.Toplevel(parent)
+        theme.center_window(win)
+        win.title("Ajustes del video insertado")
+        win.transient(parent)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text=Path(clip.path).name, style="H.TLabel").pack(
+            padx=16, pady=(14, 2))
+        ttk.Label(win, text=f"Dura {clip.duration:.1f} s · "
+                  + ("con audio" if clip.has_audio else "sin audio"),
+                  style="Muted.TLabel").pack(padx=16, pady=(0, 8))
+        g = ttk.Frame(win)
+        g.pack(padx=16)
+        ttk.Label(g, text="Tamano (% del lienzo):").grid(row=0, column=0, sticky="w", pady=4)
+        var_s = tk.IntVar(value=int(clip.scale))
+        ttk.Spinbox(g, from_=10, to=100, increment=5, textvariable=var_s,
+                    width=6).grid(row=0, column=1, padx=6)
+        ttk.Label(g, text="Se inserta en el segundo:").grid(row=1, column=0, sticky="w", pady=4)
+        var_at = tk.StringVar(value=f"{clip.at:.2f}")
+        ttk.Entry(g, textvariable=var_at, width=8).grid(row=1, column=1, padx=6)
+        ttk.Label(win, text="100% = ocupa todo el lienzo sin deformarse.\n"
+                  "Menos de 100% deja bordes negros alrededor.",
+                  style="Muted.TLabel", justify="left").pack(padx=16, pady=(8, 0))
+
+        def ok():
+            try:
+                at = max(0.0, min(float(var_at.get().replace(",", ".")), duration))
+            except ValueError:
+                at = clip.at
+            self.result = {"scale": max(10, min(100, var_s.get())), "at": at}
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=12)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Guardar", style="Primary.TButton", command=ok).pack(
             side="left", padx=6)
         win.wait_window()
 
