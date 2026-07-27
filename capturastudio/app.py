@@ -133,6 +133,12 @@ class App(tk.Tk):
         microfonos DEBEN enumerarse aqui (hilo de trabajo): la primera vez carga
         soundcard, que inicializa COM en el hilo llamante. Al terminar refresca
         los combobox en el hilo de UI."""
+        # ddagrab (Desktop Duplication) para captura de pantalla: dibuja bien los
+        # cursores de texto/cruz que gdigrab pinta como cuadrado negro.
+        try:
+            fu.enable_ddagrab_if_available(self.ffmpeg)
+        except Exception:  # noqa: BLE001
+            pass
         mics = list_microphones()
 
         def apply_mics():

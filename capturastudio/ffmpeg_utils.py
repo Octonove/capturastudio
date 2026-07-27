@@ -246,6 +246,55 @@ class _InputBag:
         return idx
 
 
+_DDAGRAB_CACHE: dict[str, bool] = {}
+_DDAGRAB_ON = False
+
+
+def enable_ddagrab_if_available(ffmpeg_path: str | None) -> bool:
+    """Prueba (una vez por ffmpeg) si ddagrab funciona y lo deja activado para las
+    capturas de PANTALLA. ddagrab (Desktop Duplication, lo que usa OBS) dibuja BIEN
+    los cursores monocromos (I-beam de texto, cruz), que gdigrab pinta como un
+    cuadrado negro (bug conocido de FFmpeg). gdigrab queda como respaldo."""
+    global _DDAGRAB_ON
+    if not ffmpeg_path:
+        return False
+    ok = _DDAGRAB_CACHE.get(ffmpeg_path)
+    if ok is None:
+        try:
+            proc = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                 "-i", "ddagrab=framerate=5,hwdownload,format=bgra",
+                 "-frames:v", "1", "-f", "null", "-"],
+                capture_output=True, timeout=20, **subprocess_kwargs())
+            ok = proc.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        _DDAGRAB_CACHE[ffmpeg_path] = ok
+        logger.info("ddagrab disponible: %s", ok)
+    _DDAGRAB_ON = bool(ok)
+    return _DDAGRAB_ON
+
+
+def _ddagrab_graph(left: int, top: int, w: int, h: int, fps: int,
+                   cursor: bool) -> str | None:
+    """Grafo lavfi de ddagrab para la region dada, o None si la region no cae
+    entera en un unico monitor (region cruzada -> respaldo gdigrab)."""
+    try:
+        from .monitors import list_monitors
+        mons = list_monitors()
+    except Exception:  # noqa: BLE001
+        return None
+    for idx, m in enumerate(mons):
+        ml, mt, mw, mh = m.region
+        if left >= ml and top >= mt and left + w <= ml + mw and top + h <= mt + mh:
+            g = (f"ddagrab=output_idx={idx}:framerate={fps}"
+                 f":draw_mouse={1 if cursor else 0},hwdownload,format=bgra")
+            if not (left == ml and top == mt and w == mw and h == mh):
+                g += f",crop={w}:{h}:{left - ml}:{top - mt}"
+            return g
+    return None
+
+
 def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
                   window_pipes: dict | None = None,
                   canvas: tuple[int, int] | None = None) -> list[str]:
@@ -257,11 +306,18 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
     _WC = ["-use_wallclock_as_timestamps", "1"]
     if src.kind == scn.KIND_SCREEN:
         p = src.params
+        left, top = int(p.get("left", 0)), int(p.get("top", 0))
+        w = max(2, _even(int(p.get("width", 1920))))
+        h = max(2, _even(int(p.get("height", 1080))))
+        if _DDAGRAB_ON:
+            g = _ddagrab_graph(left, top, w, h, fps, cursor)
+            if g:
+                return [*_WC, "-f", "lavfi", "-i", g]
         return [*_WC,
                 "-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1" if cursor else "0",
-                "-thread_queue_size", "1024", "-offset_x", str(p.get("left", 0)),
-                "-offset_y", str(p.get("top", 0)),
-                "-video_size", f"{_even(int(p.get('width', 1920)))}x{_even(int(p.get('height', 1080)))}",
+                "-thread_queue_size", "1024", "-offset_x", str(left),
+                "-offset_y", str(top),
+                "-video_size", f"{w}x{h}",
                 "-i", "desktop"]
     if src.kind == scn.KIND_WINDOW:
         # 1a opcion: WGC (Windows Graphics Capture, como OBS). El motor arranca un
@@ -445,6 +501,9 @@ def build_record_command(*, ffmpeg_path: str, scene: scn.Scene, encoder: str,
                          duration: int | None = None,
                          tmp: Path | None = None,
                          window_pipes: dict | None = None) -> list[str]:
+    # garantiza el sondeo de ddagrab aunque el hilo de arranque no haya terminado
+    # (cacheado: cuesta ~1 s solo la primera vez en todo el proceso)
+    enable_ddagrab_if_available(ffmpeg_path)
     inputs, fc, vout = build_scene(scene, scene.fps, cursor, tmp, window_pipes)
     cmd = [ffmpeg_path, "-y", "-hide_banner", "-loglevel", "warning"]
     cmd += inputs

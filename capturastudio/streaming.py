@@ -78,6 +78,7 @@ def build_stream_command(*, ffmpeg_path: str, scene, encoder: str, bitrate_k: in
                          output_override: str | None = None,
                          extra_ingests: list[str] | None = None,
                          window_pipes: dict | None = None) -> list[str]:
+    fu.enable_ddagrab_if_available(ffmpeg_path)   # cacheado; cursor bien dibujado
     inputs, fc, vout = fu.build_scene(scene, scene.fps, cursor, tmp, window_pipes)
     audio_idx = inputs.count("-i")  # el pipe de audio es la entrada siguiente
     cmd = [ffmpeg_path, "-hide_banner", "-loglevel", "warning", "-stats"]

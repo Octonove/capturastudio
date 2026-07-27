@@ -57,6 +57,7 @@ class ReplayBuffer:
         self._pumpset = wincap.WindowPumpSet()
 
     def _build_cmd(self, has_audio: bool) -> list[str]:
+        fu.enable_ddagrab_if_available(self.ffmpeg)   # cacheado; cursor bien dibujado
         inputs, fc, vout = fu.build_scene(self.scene, self.scene.fps, self.cursor,
                                           work_dir(), self._pumpset.inputs)
         audio_idx = inputs.count("-i")
