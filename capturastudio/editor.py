@@ -29,7 +29,7 @@ from PIL import Image, ImageFilter, ImageTk
 
 from . import APP_NAME
 from . import ffmpeg_utils as fu
-from . import ai_post, autoframe, privacy_shield, theme
+from . import ai_post, autoframe, content_factory, privacy_shield, theme
 from .config import work_dir
 from .quality_check import has_audio_stream
 
@@ -467,8 +467,7 @@ class EditorWindow(tk.Toplevel):
         self._scrub_id = None
         self._photo = None
         self._ov_imgs: dict[int, Image.Image] = {}  # cache de PNG/imagen por overlay
-        self._clip_frames: dict[str, Image.Image] = {}  # primer fotograma por clip
-        self._clip_busy: set[str] = set()
+        self._clip_caches: dict[str, FrameCache] = {}   # fotogramas de cada clip
 
         self.title(f"Editor — {Path(video).name}")
         self.configure(bg=theme.BG)
@@ -645,31 +644,40 @@ class EditorWindow(tk.Toplevel):
             self._ov_imgs[key] = img
         return img
 
-    def _clip_frame(self, path: str) -> Image.Image | None:
-        """Primer fotograma de un clip insertado (cacheado; se extrae en un hilo)."""
-        if path in self._clip_frames:
-            return self._clip_frames[path]
-        if path in self._clip_busy:
-            return None
-        self._clip_busy.add(path)
+    def _clip_cache(self, path: str) -> FrameCache:
+        """FrameCache propio de cada clip insertado (cualquier momento, no solo el
+        primer fotograma)."""
+        fc = self._clip_caches.get(path)
+        if fc is None:
+            fc = self._clip_caches[path] = FrameCache(self.ffmpeg, path, fps=self.fps)
+        return fc
 
-        def work():
-            img = FrameCache(self.ffmpeg, path)._extract(0.1)
-            if img is not None:
-                self._clip_frames[path] = img
-            self._clip_busy.discard(path)
-            try:
-                self.after(0, self._refresh_canvas)
-            except (RuntimeError, tk.TclError):
-                pass
-        threading.Thread(target=work, daemon=True).start()
+    def _clip_frame(self, cl: Clip, off: float) -> Image.Image | None:
+        """Fotograma del clip en el segundo `off` (asincrono; repinta al llegar)."""
+        off = min(max(0.0, off), max(0.0, cl.duration - 0.05))
+        fc = self._clip_cache(cl.path)
+        img = fc.get(off)
+        if img is None:
+            fc.request(off, lambda _i: self.after(0, self._refresh_canvas))
+        return img
+
+    def _clip_under_playhead(self) -> tuple[Clip, float] | None:
+        """(clip, offset) si el playhead esta sobre la barra de un clip insertado."""
+        for cl in self.clips:
+            if cl.duration > 0 and cl.at <= self.t <= cl.at + cl.duration:
+                return cl, self.t - cl.at
         return None
 
     def _refresh_canvas(self) -> None:
-        # Con un CLIP seleccionado, el lienzo ensena ese video (su primer fotograma,
-        # a su escala): antes solo se veia su barra y parecia que "no estaba".
+        # Con un CLIP seleccionado, el lienzo ensena ese video a su escala.
         if self.sel and self.sel[0] == "clip" and self.sel[1] < len(self.clips):
-            self._draw_clip_preview(self.clips[self.sel[1]])
+            self._draw_clip_preview(self.clips[self.sel[1]], 0.0)
+            return
+        # Playhead sobre la barra de un clip: ensenar ESE momento del clip (idea de
+        # como quedara al exportar, sin tener que seleccionarlo).
+        hit = self._clip_under_playhead()
+        if hit is not None:
+            self._draw_clip_preview(hit[0], hit[1])
             return
         ox, oy, sc = self._pv_rect()
         frame = self.frames.get(self.t)
@@ -708,12 +716,12 @@ class EditorWindow(tk.Toplevel):
             self.cv.create_rectangle(x1 - HANDLE_PX, y1 - HANDLE_PX, x1, y1,
                                      fill=theme.PRIMARY, outline="")
 
-    def _draw_clip_preview(self, cl: Clip) -> None:
+    def _draw_clip_preview(self, cl: Clip, off: float = 0.0) -> None:
         """Compone el clip como lo hara el export: proporcional a su escala,
-        centrado sobre negro en el lienzo."""
+        centrado sobre negro en el lienzo. `off` = segundo dentro del clip."""
         ox, oy, sc = self._pv_rect()
         base = Image.new("RGB", (self.vw, self.vh), "#000000")
-        frame = self._clip_frame(cl.path)
+        frame = self._clip_frame(cl, off)
         if frame is not None:
             pct = max(10, min(100, int(cl.scale))) / 100.0
             tw, th = max(2, int(self.vw * pct)), max(2, int(self.vh * pct))
@@ -728,8 +736,8 @@ class EditorWindow(tk.Toplevel):
         self.cv.create_image(ox, oy, anchor="nw", image=self._photo)
         self.cv.create_text(
             ox + 8, oy + 8, anchor="nw", fill="#E6EDF3", font=(theme.FONT, 9),
-            text=f"Video insertado: {Path(cl.path).name}  ·  se reproduce entero en "
-                 f"{self._fmt(cl.at)}  (clic en el lienzo para volver)")
+            text=f"Video insertado: {Path(cl.path).name}  ·  {self._fmt(off)} de "
+                 f"{cl.duration:.1f}s  ·  se inserta en {self._fmt(cl.at)}")
 
     def _cv_press(self, ev) -> None:
         ox, oy, sc = self._pv_rect()
@@ -1173,7 +1181,8 @@ class EditorWindow(tk.Toplevel):
             messagebox.showerror(APP_NAME, f"No se pudo guardar:\n{exc}", parent=self)
             return
         self.project_path = p
-        self._set_status_text(f"Proyecto guardado: {Path(p).name}")
+        self._update_title()
+        self._set_status_text(f"✔ Proyecto guardado: {Path(p).name}")
 
     def _open_project(self) -> None:
         p = filedialog.askopenfilename(
@@ -1208,7 +1217,8 @@ class EditorWindow(tk.Toplevel):
                 return
         self.load_project(data)
         self.project_path = p
-        self._set_status_text(f"Proyecto cargado: {Path(p).name}")
+        self._update_title()
+        self._set_status_text(f"✔ Proyecto cargado: {Path(p).name}")
 
     def load_project(self, data: dict) -> None:
         """Sustituye la edicion actual por la del proyecto. Se construye TODO en
@@ -1277,6 +1287,17 @@ class EditorWindow(tk.Toplevel):
                 APP_NAME, "No se han encontrado estos archivos del proyecto, asi que "
                 "esos elementos no se han cargado:\n\n• " + "\n• ".join(faltan[:8])
                 + "\n\nSi los mueves de sitio, vuelve a anadirlos.", parent=self)
+
+    def _update_title(self) -> None:
+        """El titulo lleva el nombre del proyecto: confirmacion visible y permanente
+        de que se guardo (el aviso de la barra de estado pasaba desapercibido)."""
+        t = f"Editor — {Path(self.video).name}"
+        if self.project_path:
+            t += f"   [{Path(self.project_path).name}]"
+        try:
+            self.title(t)
+        except tk.TclError:
+            pass
 
     def _set_status_text(self, msg: str) -> None:
         try:
@@ -1347,12 +1368,19 @@ class EditorWindow(tk.Toplevel):
                                 "corte antes de exportar.", parent=self)
             return
         out = filedialog.asksaveasfilename(
-            title="Exportar video como…", defaultextension=".mp4", parent=self,
+            title="Exportar como… (elige GIF en el desplegable para un GIF animado)",
+            defaultextension=".mp4", parent=self,
             initialfile=Path(self.video).stem + "_editado.mp4",
             initialdir=str(Path(self.video).parent),
-            filetypes=[("Video MP4", "*.mp4")]) or None
+            filetypes=[("Video MP4", "*.mp4"), ("GIF animado", "*.gif")]) or None
         if not out:
             return
+        is_gif = out.lower().endswith(".gif")
+        gif_opts = None
+        if is_gif:
+            gif_opts = _GifDialog(self).result
+            if not gif_opts:
+                return
         # NUNCA sobrescribir el video de origen (ni un clip insertado): FFmpeg lo
         # trunca al abrirlo para escribir y se perderia el original.
         try:
@@ -1380,22 +1408,81 @@ class EditorWindow(tk.Toplevel):
                 + "\n\n¿Exportar de todos modos?", parent=self):
             return
         enc = fu.resolve_encoder(self.app.var_enc.get(), self.app.encoders, self.ffmpeg)
+        # para GIF se exporta primero el montaje completo a un MP4 temporal y luego
+        # se convierte (paleta de 2 pasadas de to_gif); asi el GIF lleva TODO:
+        # cortes, insertos, textos y transiciones.
+        target = (str(work_dir() / f"_editor_gif_{os.getpid()}.mp4") if is_gif else out)
         cmd = build_export_cmd(
             self.ffmpeg, self.video, self.vw, self.vh, self.duration,
-            list(self.overlays), list(self.cuts), out, encoder=enc,
+            list(self.overlays), list(self.cuts), target, encoder=enc,
             quality_key=self.app.var_quality.get(), with_audio=self.with_audio,
             crossfade=(0.5 if self.var_xfade.get() else 0.0),
             fade_inout=(0.5 if self.var_fade.get() else 0.0),
             clips=list(self.clips), fps=self.fps)
+        ff = self.ffmpeg
 
         def work():
-            run_export(cmd, out)
+            run_export(cmd, target)
+            if is_gif:
+                try:
+                    total = ai_post.get_duration(ff, target) or 1.0
+                    content_factory.to_gif(ff, target, out, start=0.0, dur=total,
+                                           width=int(gif_opts["width"]),
+                                           fps=int(gif_opts["fps"]))
+                finally:
+                    try:
+                        Path(target).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                if not Path(out).is_file():
+                    raise EditorError("No se pudo generar el GIF.")
             return out
-        self.app._run_with_progress("Exportando video editado…", work,
-                                    lambda r: f"Video exportado:\n{r}")
+        self.app._run_with_progress(
+            "Exportando GIF animado…" if is_gif else "Exportando video editado…",
+            work, lambda r: ("GIF exportado:\n" if is_gif else "Video exportado:\n") + r)
 
 
 # --------------------------------------------------------------- dialogos
+class _GifDialog:
+    """Opciones del GIF exportado desde el editor: ancho y fps."""
+
+    def __init__(self, parent):
+        self.result: dict | None = None
+        win = tk.Toplevel(parent)
+        theme.center_window(win)
+        win.title("Exportar como GIF")
+        win.transient(parent)
+        win.resizable(False, False)
+        win.grab_set()
+        ttk.Label(win, text="Opciones del GIF animado", style="H.TLabel").pack(
+            padx=16, pady=(14, 8))
+        g = ttk.Frame(win)
+        g.pack(padx=16)
+        ttk.Label(g, text="Ancho (px):").grid(row=0, column=0, sticky="w", pady=3)
+        var_w = tk.StringVar(value="640")
+        ttk.Combobox(g, textvariable=var_w, values=["480", "640", "800", "1024"],
+                     width=8, state="readonly").grid(row=0, column=1, padx=6)
+        ttk.Label(g, text="FPS:").grid(row=1, column=0, sticky="w", pady=3)
+        var_f = tk.StringVar(value="12")
+        ttk.Combobox(g, textvariable=var_f, values=["8", "10", "12", "15", "20"],
+                     width=8, state="readonly").grid(row=1, column=1, padx=6)
+        ttk.Label(win, text="Los GIF pesan: para montajes largos usa menos ancho/fps.",
+                  style="Muted.TLabel").pack(padx=16, pady=(8, 0))
+
+        def ok():
+            try:
+                self.result = {"width": int(var_w.get()), "fps": int(var_f.get())}
+            except ValueError:
+                self.result = {"width": 640, "fps": 12}
+            win.destroy()
+        bar = ttk.Frame(win)
+        bar.pack(pady=12)
+        ttk.Button(bar, text="Cancelar", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(bar, text="Exportar", style="Primary.TButton", command=ok).pack(
+            side="left", padx=6)
+        win.wait_window()
+
+
 class _TextDialog:
     """Texto + tamano + color + fondo opcional. result = params del overlay.
     Con `initial` sirve tambien para EDITAR un texto ya anadido."""
