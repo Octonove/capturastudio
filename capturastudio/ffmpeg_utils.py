@@ -305,6 +305,11 @@ def _source_input(src: scn.Source, fps: int, cursor: bool, tmp: Path,
     # la duracion del video siempre coincide con el tiempo grabado.
     _WC = ["-use_wallclock_as_timestamps", "1"]
     if src.kind == scn.KIND_SCREEN:
+        # 1a opcion: WGC de MONITOR (pump por named pipe): el cursor lo compone
+        # Windows y se ve siempre igual que en pantalla (los punteros
+        # personalizados salian como cuadrado negro con gdigrab/ddagrab).
+        if window_pipes and src.id in window_pipes:
+            return list(window_pipes[src.id])
         p = src.params
         left, top = int(p.get("left", 0)), int(p.get("top", 0))
         w = max(2, _even(int(p.get("width", 1920))))

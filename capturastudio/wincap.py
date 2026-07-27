@@ -93,12 +93,21 @@ except Exception as exc:  # noqa: BLE001
 # Sesion WGC: mantiene el ULTIMO fotograma a tamano fijo
 # ---------------------------------------------------------------------------
 class _WgcSession:
-    """Arranca WGC sobre un hwnd y guarda el ultimo fotograma (BGRA) a tamano
-    fijado en el primer frame. Con pad/crop si la ventana cambia de tamano, para
-    que el flujo de bytes hacia FFmpeg no varie de dimensiones."""
+    """Arranca WGC sobre un hwnd O un monitor y guarda el ultimo fotograma (BGRA)
+    a tamano fijado en el primer frame. Con pad/crop si la fuente cambia de
+    tamano, para que el flujo de bytes hacia FFmpeg no varie de dimensiones.
 
-    def __init__(self, hwnd: int, cursor: bool = True):
-        self.hwnd = int(hwnd)
+    monitor: indice de monitor de windows-capture (1-based). crop: (x, y, w, h)
+    RELATIVO al monitor — la razon de capturar monitores por WGC es que el CURSOR
+    lo compone Windows (DWM) y se ve SIEMPRE igual que en pantalla, sea cual sea
+    el estilo/tamano de puntero del usuario (gdigrab/ddagrab lo dibujan ellos y
+    con punteros personalizados sale un cuadrado negro)."""
+
+    def __init__(self, hwnd: int, cursor: bool = True, monitor: int | None = None,
+                 crop: tuple[int, int, int, int] | None = None):
+        self.hwnd = int(hwnd or 0)
+        self.monitor = monitor
+        self.crop = crop
         self.cursor = cursor
         self.w = 0
         self.h = 0
@@ -114,7 +123,7 @@ class _WgcSession:
         (para conocer el tamano); con wait=False vuelve enseguida (el preview no
         debe congelar la UI) y el tamano/frame llegan de forma asincrona."""
         wc = _load_wc()
-        if wc is None or not self.hwnd:
+        if wc is None or (not self.hwnd and self.monitor is None):
             return False
         try:
             import numpy as np  # noqa: PLC0415
@@ -123,16 +132,26 @@ class _WgcSession:
             return False
 
         try:
-            cap = wc.WindowsCapture(window_hwnd=self.hwnd, cursor_capture=bool(self.cursor),
-                                    draw_border=False)
+            if self.monitor is not None:
+                cap = wc.WindowsCapture(monitor_index=int(self.monitor),
+                                        cursor_capture=bool(self.cursor),
+                                        draw_border=False)
+            else:
+                cap = wc.WindowsCapture(window_hwnd=self.hwnd,
+                                        cursor_capture=bool(self.cursor),
+                                        draw_border=False)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("WGC no pudo abrir la ventana %s: %s", self.hwnd, exc)
+            logger.warning("WGC no pudo abrir la fuente (hwnd=%s mon=%s): %s",
+                           self.hwnd, self.monitor, exc)
             return False
 
         @cap.event
         def on_frame_arrived(frame, ctrl):  # noqa: ANN001
             try:
                 buf = frame.frame_buffer          # (H, W, 4) BGRA
+                if self.crop is not None:
+                    cx, cy, cw, ch = self.crop
+                    buf = buf[cy:cy + ch, cx:cx + cw]
                 with self._lock:
                     if self.w == 0:
                         self.h, self.w = int(buf.shape[0]), int(buf.shape[1])
@@ -239,8 +258,10 @@ class WindowPump:
     los componga como una fuente mas. El escritor RECONECTA el pipe en cada
     segmento (el motor relanza FFmpeg al pausar/reanudar)."""
 
-    def __init__(self, hwnd: int, fps: int, name: str, cursor: bool = True):
-        self._sess = _WgcSession(hwnd, cursor)
+    def __init__(self, hwnd: int, fps: int, name: str, cursor: bool = True,
+                 monitor: int | None = None,
+                 crop: tuple[int, int, int, int] | None = None):
+        self._sess = _WgcSession(hwnd, cursor, monitor=monitor, crop=crop)
         self.fps = max(1, int(fps))
         self.name = name
         self.pipe_path = rf"\\.\pipe\cs_wgc_{os.getpid()}_{next(_pipe_seq)}_{name}"
@@ -420,8 +441,54 @@ class WindowPumpSet:
                 self.inputs[src.id] = pump.ffmpeg_input()
             else:
                 pump.stop()
+        # PANTALLAS por WGC de monitor: el cursor lo compone Windows y se ve
+        # SIEMPRE bien (con punteros personalizados, gdigrab/ddagrab lo dibujan
+        # como un cuadrado negro). Si el pump falla, build_scene cae a
+        # ddagrab/gdigrab como hasta ahora.
+        try:
+            from .monitors import list_monitors
+            mons = list_monitors()
+        except Exception:  # noqa: BLE001
+            mons = []
+        for src in scene.visible_sorted():
+            if src.kind != scn.KIND_SCREEN or not mons:
+                continue
+            p = src.params
+            left, top = int(p.get("left", 0)), int(p.get("top", 0))
+            w, h = int(p.get("width", 1920)), int(p.get("height", 1080))
+            target = None
+            for mi, m in enumerate(mons):
+                ml, mt, mw, mh = m.region
+                if left >= ml and top >= mt and left + w <= ml + mw and top + h <= mt + mh:
+                    target = (mi, ml, mt, mw, mh)
+                    break
+            if target is None:
+                continue                     # region que cruza monitores -> ddagrab
+            mi, ml, mt, mw, mh = target
+            crop = None
+            if not (left == ml and top == mt and w == mw and h == mh):
+                crop = (left - ml, top - mt, w, h)
+            # windows-capture numera los monitores desde 1
+            pump = WindowPump(0, fps, name=str(src.id), cursor=cursor,
+                              monitor=mi + 1, crop=crop)
+            try:
+                ok = pump.start()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MonitorPump WGC fallo: %s", exc)
+                ok = False
+            # autocomprobacion: el tamano servido debe ser el de la region pedida
+            # (protege de un orden de monitores distinto entre APIs)
+            if ok and pump.size != (w, h):
+                logger.warning("MonitorPump: tamano %s != region %s; descartado.",
+                               pump.size, (w, h))
+                ok = False
+            if ok:
+                self._pumps[src.id] = pump
+                self.inputs[src.id] = pump.ffmpeg_input()
+            else:
+                pump.stop()
         if self._pumps:
-            logger.info("WGC activo para %d ventana(s).", len(self._pumps))
+            logger.info("WGC activo para %d fuente(s).", len(self._pumps))
 
     def stop(self) -> None:
         pumps = list(self._pumps.values())
