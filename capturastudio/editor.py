@@ -377,19 +377,20 @@ def run_export(cmd: list[str], out_path: str, timeout: int = 3600) -> None:
 # ------------------------------------------------------------------ frames
 class FrameCache:
     """Extrae fotogramas del video con FFmpeg (a memoria, sin temporales) y los
-    cachea por cubos de 0.25 s. La extraccion corre en un hilo unico."""
+    cachea POR FRAME (cubos de 1/fps: asi el paso fotograma-a-fotograma con las
+    flechas muestra de verdad un frame distinto). Extraccion en un hilo unico."""
 
-    def __init__(self, ffmpeg: str, video: str):
+    def __init__(self, ffmpeg: str, video: str, fps: int = 25):
         self.ffmpeg = ffmpeg
         self.video = video
+        self._fps = max(1, min(240, int(fps)))
         self._cache: dict[int, Image.Image] = {}
         self._lock = threading.Lock()
         self._busy = False
         self._pending: tuple[float, object] | None = None
 
-    @staticmethod
-    def _key(t: float) -> int:
-        return int(round(t * 4))
+    def _key(self, t: float) -> int:
+        return int(round(t * self._fps))
 
     def get(self, t: float) -> Image.Image | None:
         return self._cache.get(self._key(t))
@@ -408,7 +409,7 @@ class FrameCache:
             img = self._extract(t)
             if img is not None:
                 self._cache[self._key(t)] = img
-                if len(self._cache) > 240:   # ~1 min de scrub fino: purga simple
+                if len(self._cache) > 400:   # paso a paso genera mas frames: purga simple
                     self._cache.pop(next(iter(self._cache)))
             try:
                 cb(img)
@@ -466,15 +467,37 @@ class EditorWindow(tk.Toplevel):
         self._scrub_id = None
         self._photo = None
         self._ov_imgs: dict[int, Image.Image] = {}  # cache de PNG/imagen por overlay
+        self._clip_frames: dict[str, Image.Image] = {}  # primer fotograma por clip
+        self._clip_busy: set[str] = set()
 
         self.title(f"Editor — {Path(video).name}")
         self.configure(bg=theme.BG)
         self.geometry("1160x780")
         self.minsize(900, 600)
-        self.frames = FrameCache(self.ffmpeg, video)
+        self.frames = FrameCache(self.ffmpeg, video, fps=self.fps)
         self._build()
         self.bind("<Delete>", lambda _e: self._delete_sel())
+        # paso fotograma a fotograma con las flechas (Shift = 1 segundo)
+        self.bind("<Left>", lambda _e: self._step(-1))
+        self.bind("<Right>", lambda _e: self._step(1))
+        self.bind("<Shift-Left>", lambda _e: self._step(-self.fps))
+        self.bind("<Shift-Right>", lambda _e: self._step(self.fps))
         self._goto(0.0)
+
+    def _step(self, frames: int) -> str | None:
+        """Mueve el playhead N fotogramas (flechas). No roba las teclas cuando el
+        foco esta en un campo de texto."""
+        try:
+            w = self.focus_get()
+            if w is not None and w.winfo_class() in (
+                    "Entry", "TEntry", "Text", "Spinbox", "TSpinbox", "TCombobox"):
+                return None
+        except (KeyError, tk.TclError):
+            pass
+        t = max(0.0, min(self.duration, self.t + frames / max(1, self.fps)))
+        self.var_t.set(t)
+        self._goto(t)
+        return "break"
 
     # ---------------------------------------------------------------- UI
     def _build(self) -> None:
@@ -544,7 +567,7 @@ class EditorWindow(tk.Toplevel):
         au = "con audio" if self.with_audio else "SIN audio"
         return (f"{self.vw}x{self.vh} · {self._fmt(self.duration)} · {au} — arrastra los "
                 "elementos en el lienzo; en la linea de tiempo muevelos o estira sus "
-                "bordes; doble clic = ajustes.")
+                "bordes; doble clic = ajustes; flechas ←→ = fotograma a fotograma.")
 
     @staticmethod
     def _fmt(t: float) -> str:
@@ -561,6 +584,12 @@ class EditorWindow(tk.Toplevel):
         self._scrub_id = self.after(90, lambda: self._goto(self.var_t.get()))
 
     def _goto(self, t: float) -> None:
+        # al moverse por el tiempo se vuelve a la vista del video (si habia un clip
+        # seleccionado, su previsualizacion dejaria el lienzo "congelado")
+        if self.sel and self.sel[0] == "clip":
+            self.sel = None
+            self._sel_changed()
+            self._refresh_tl()
         self.t = max(0.0, min(float(t), self.duration))
         self.lbl_time.config(text=f"{self._fmt(self.t)} / {self._fmt(self.duration)}")
         self._refresh_canvas()
@@ -616,7 +645,32 @@ class EditorWindow(tk.Toplevel):
             self._ov_imgs[key] = img
         return img
 
+    def _clip_frame(self, path: str) -> Image.Image | None:
+        """Primer fotograma de un clip insertado (cacheado; se extrae en un hilo)."""
+        if path in self._clip_frames:
+            return self._clip_frames[path]
+        if path in self._clip_busy:
+            return None
+        self._clip_busy.add(path)
+
+        def work():
+            img = FrameCache(self.ffmpeg, path)._extract(0.1)
+            if img is not None:
+                self._clip_frames[path] = img
+            self._clip_busy.discard(path)
+            try:
+                self.after(0, self._refresh_canvas)
+            except (RuntimeError, tk.TclError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+        return None
+
     def _refresh_canvas(self) -> None:
+        # Con un CLIP seleccionado, el lienzo ensena ese video (su primer fotograma,
+        # a su escala): antes solo se veia su barra y parecia que "no estaba".
+        if self.sel and self.sel[0] == "clip" and self.sel[1] < len(self.clips):
+            self._draw_clip_preview(self.clips[self.sel[1]])
+            return
         ox, oy, sc = self._pv_rect()
         frame = self.frames.get(self.t)
         base = (frame.copy() if frame is not None
@@ -653,6 +707,29 @@ class EditorWindow(tk.Toplevel):
                                      width=2, dash=dash)
             self.cv.create_rectangle(x1 - HANDLE_PX, y1 - HANDLE_PX, x1, y1,
                                      fill=theme.PRIMARY, outline="")
+
+    def _draw_clip_preview(self, cl: Clip) -> None:
+        """Compone el clip como lo hara el export: proporcional a su escala,
+        centrado sobre negro en el lienzo."""
+        ox, oy, sc = self._pv_rect()
+        base = Image.new("RGB", (self.vw, self.vh), "#000000")
+        frame = self._clip_frame(cl.path)
+        if frame is not None:
+            pct = max(10, min(100, int(cl.scale))) / 100.0
+            tw, th = max(2, int(self.vw * pct)), max(2, int(self.vh * pct))
+            k = min(tw / frame.width, th / frame.height)
+            fw, fh = max(1, int(frame.width * k)), max(1, int(frame.height * k))
+            base.paste(frame.resize((fw, fh), Image.LANCZOS),
+                       ((self.vw - fw) // 2, (self.vh - fh) // 2))
+        disp = base.resize((max(1, int(self.vw * sc)), max(1, int(self.vh * sc))),
+                           Image.LANCZOS)
+        self._photo = ImageTk.PhotoImage(disp)
+        self.cv.delete("all")
+        self.cv.create_image(ox, oy, anchor="nw", image=self._photo)
+        self.cv.create_text(
+            ox + 8, oy + 8, anchor="nw", fill="#E6EDF3", font=(theme.FONT, 9),
+            text=f"Video insertado: {Path(cl.path).name}  ·  se reproduce entero en "
+                 f"{self._fmt(cl.at)}  (clic en el lienzo para volver)")
 
     def _cv_press(self, ev) -> None:
         ox, oy, sc = self._pv_rect()
@@ -853,7 +930,14 @@ class EditorWindow(tk.Toplevel):
             return
         dt = self._x2t(ev.x) - t0
         if kind == "clip":      # el clip solo cambia su PUNTO de insercion
-            self.clips[j].at = max(0.0, min(s0 + dt, self.duration))
+            at = max(0.0, min(s0 + dt, self.duration))
+            # iman al principio/final: clavar el cierre exactamente al final a mano
+            # era un suplicio (quedaba un pelin de video original detras)
+            if at < 0.3:
+                at = 0.0
+            elif self.duration - at < 0.3:
+                at = self.duration
+            self.clips[j].at = at
             self._refresh_tl()
             self._sel_changed()
             return
@@ -1512,6 +1596,12 @@ class _ClipDialog:
         ttk.Label(g, text="Se inserta en el segundo:").grid(row=1, column=0, sticky="w", pady=4)
         var_at = tk.StringVar(value=f"{clip.at:.2f}")
         ttk.Entry(g, textvariable=var_at, width=8).grid(row=1, column=1, padx=6)
+        atajos = ttk.Frame(g)
+        atajos.grid(row=2, column=0, columnspan=2, pady=(2, 0))
+        ttk.Button(atajos, text="Al principio (intro)", width=17,
+                   command=lambda: var_at.set("0")).pack(side="left", padx=3)
+        ttk.Button(atajos, text="Al final (cierre)", width=15,
+                   command=lambda: var_at.set(f"{duration:.2f}")).pack(side="left", padx=3)
         ttk.Label(win, text="100% = ocupa todo el lienzo sin deformarse.\n"
                   "Menos de 100% deja bordes negros alrededor.",
                   style="Muted.TLabel", justify="left").pack(padx=16, pady=(8, 0))
