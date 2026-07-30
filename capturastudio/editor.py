@@ -988,6 +988,15 @@ class EditorWindow(tk.Toplevel):
         s = min(self.t, max(0.0, self.duration - span))
         return s, min(self.duration, s + span)
 
+    def _fit_text_overlay(self, ov: Overlay, src: "Image.Image") -> None:
+        """El tamano en lienzo SIGUE al tamano de letra: 1 px del PNG renderizado =
+        1 px de video (acotado al lienzo). Antes, al editar un texto se conservaba
+        el ancho anterior y cambiar el tamano de letra no se veia."""
+        k = min(1.0, (self.vw * 0.95) / max(1, src.width),
+                (self.vh * 0.6) / max(1, src.height))
+        ov.w = max(24, int(src.width * k))
+        ov.h = max(12, int(src.height * k))
+
     def _add_text(self) -> None:
         d = _TextDialog(self)
         if not d.result:
@@ -1001,8 +1010,7 @@ class EditorWindow(tk.Toplevel):
             self.overlays.pop()
             messagebox.showinfo(APP_NAME, "No se pudo renderizar el texto.", parent=self)
             return
-        scale = min(1.0, (self.vw * 0.5) / src.width)
-        ov.w, ov.h = max(24, int(src.width * scale)), max(12, int(src.height * scale))
+        self._fit_text_overlay(ov, src)
         ov.x, ov.y = (self.vw - ov.w) // 2, int(self.vh * 0.78)
         self.sel = ("ov", i)
         self._sel_changed()
@@ -1115,8 +1123,13 @@ class EditorWindow(tk.Toplevel):
                 ov.params.update(d.result)
                 self._ov_imgs.pop(id(ov), None)
                 src = self._ov_image(j, ov)
-                if src is not None:      # re-ajusta el alto al nuevo texto/tamano
-                    ov.h = max(8, int(ov.w * src.height / max(1, src.width)))
+                if src is not None:
+                    # re-encaja conservando el CENTRO: el nuevo tamano de letra se
+                    # ve de verdad (antes se conservaba el ancho y no cambiaba nada)
+                    cx, cy = ov.x + ov.w // 2, ov.y + ov.h // 2
+                    self._fit_text_overlay(ov, src)
+                    ov.x = max(-ov.w + 8, min(cx - ov.w // 2, self.vw - 8))
+                    ov.y = max(-ov.h + 8, min(cy - ov.h // 2, self.vh - 8))
                 changed = True
         elif ov.kind == "box":
             d = _BoxDialog(self, initial=ov.params)
