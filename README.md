@@ -1,140 +1,54 @@
 # CapturaStudio
 
-Estudio de **grabación y streaming** de escritorio para **Windows**, 100% local, con
-**superpoderes de IA** que OBS no tiene. Evolución de CapturaPro: en vez de pelear
-por un compositor GPU en vivo, compone la escena en el **render** con FFmpeg
-(calidad completa) y convierte una toma en un paquete de contenido.
+[![license](https://img.shields.io/github/license/Octonove/capturastudio)](LICENSE)
+[![release](https://img.shields.io/github/v/release/Octonove/capturastudio)](https://github.com/Octonove/capturastudio/releases/latest)
+[![platform](https://img.shields.io/badge/platform-Windows%2010%2F11-1E3A5F)](https://github.com/Octonove/capturastudio/releases/latest)
 
-> 100% en tu PC · sin marca de agua · sin límites · código abierto (MIT)
+An OBS-style recording & streaming studio with local AI superpowers — record, stream, auto-edit.
 
-## ⬇️ Descargar (Windows 10/11)
+**Free · Open source (MIT) · 100% local — nothing ever leaves your PC · No accounts, no limits, no watermarks**
 
-### ➡️ [**Descargar CapturaStudio (instalador .exe)**](https://github.com/Octonove/capturastudio/releases/latest/download/CapturaStudio-Setup.exe)
+<img src="docs/screenshot.png" width="720" alt="CapturaStudio screenshot">
 
-Descarga **directa** del instalador, sin registro. También puedes ver la [última versión y notas](https://github.com/Octonove/capturastudio/releases/latest).
+> 🇪🇸 ¿Prefieres leerlo en español? → **[README en español](README.es.md)**
 
-> Si Windows muestra *"Windows protegió tu PC"* (es normal en programas nuevos sin firma): pulsa **Más información → Ejecutar de todas formas**. Se instala sin permisos de administrador.
+## Features
 
----
+- Layered scenes: screen, **occlusion-proof window capture (WGC)**, webcam with chroma key, images, text and media
+- **Timeline video editor**: texts, images, color boxes, blur, cuts, inserted intro/outro clips, crossfade transitions and GIF export
+- Local AI post-production: **Whisper subtitles**, silence trimming, auto-chapters for YouTube, privacy blur
+- Live streaming to Twitch / YouTube / custom RTMP with VOD recording, plus an instant-replay buffer
+- Duration always matches real time, even when your PC can't sustain the target FPS
 
-## Funciones
+## Download (Windows 10/11)
 
-### Tres modos (elige tu camino)
-Al abrir la app eliges un modo (y puedes cambiar desde el menú **🚀 Modos**):
-- **🎓 Docente** — graba tu clase y, al parar, la IA local la pule (sin editar).
-- **📚 Curso para YouTube** — como Docente, y además genera **capítulos por tema +
-  índice clicable** listos para YouTube.
-- **🎬 Streamer / Estudio** — el estudio completo: escenas por capas, chroma, directo
-  multidestino y buffer de repetición.
+### ➡️ [**Download CapturaStudio (installer .exe)**](https://github.com/Octonove/capturastudio/releases/latest/download/CapturaStudio-Setup.exe)
 
-### Escena y grabación
-- **Fuentes** componibles por capas: pantalla/monitor, **captura de una ventana**
-  (elige la app de una lista de las que tienes abiertas), **webcam** (recorte
-  circular o **chroma key**), imagen (con alfa), texto, color y vídeo/media.
-- **Captura de ventana tipo OBS** (Windows Graphics Capture): graba solo esa
-  ventana **aunque la tapes con otra** y **la sigue** si la mueves o **cambia de
-  título** (navegadores que cambian de pestaña), también con apps aceleradas por
-  GPU. Funciona igual en **grabación, streaming en directo y replay**, y el vídeo
-  **mantiene la velocidad real** aunque el PC no llegue a los FPS pedidos. En
-  equipos antiguos cae automáticamente a la captura por región.
-- **Texto personalizable**: color del texto, **fondo** activable con su propio
-  color y **opacidad de fondo independiente** (texto opaco sobre fondo tenue), y
-  edición del texto/tamaño después de crearlo.
-- **Recorte de la fuente**: marca en un clic la zona a grabar (p. ej. solo el
-  contenido de una ventana, sin barras ni pestañas).
-- Editor de **layout** con inspector (posición, **tamaño ancho y alto**, forma,
-  opacidad) y **vista previa de encuadre** en vivo fiel a lo que se graba
-  (arrastrar/redimensionar las fuentes con el ratón).
-- **Múltiples escenas** (slots) en un mismo proyecto: crea, duplica, renombra y
-  **conmuta** entre ellas; el proyecto entero se guarda/carga en un `.json`.
-- Grabación a **calidad nativa** (NVENC / AMF / QSV / x264, CRF/CQ), **pausa y
-  reanudación** sin pérdida, y **audio** de sistema (loopback WASAPI) + micrófono.
-- **Medidores VU** en vivo (sistema y micro) y **grabación programada**
-  (empezar a una hora / dentro de N min, con parada automática opcional).
+Direct download, no sign-up. If Windows shows *"Windows protected your PC"* (normal for new unsigned apps): click **More info → Run anyway**. Installs without administrator rights.
 
-### Directo (streaming)
-- Salida a **Twitch, YouTube, Facebook, Kick** o RTMP/RTMPS personalizado —
-  solo pegas tu *stream key*.
-- Audio en vivo, **grabación de VOD** simultánea (.mkv) y **reconexión** automática.
+> ⭐ **If CapturaStudio is useful to you, a star on GitHub is the best way to support it — it costs nothing and helps a lot.**
 
-### 🎬 Editor de vídeo con línea de tiempo
-- Abre cualquier grabación (o vídeo importado) y edítala **sin salir de la app**:
-  **textos**, **imágenes**, **cuadros de color** (con opacidad) y **difuminados**
-  que se colocan **arrastrándolos sobre el vídeo** y se redimensionan con el ratón.
-- Cada elemento es una **barra en la línea de tiempo**: muévela o estira sus bordes
-  para decidir **cuándo aparece y desaparece**. Vista previa con el fotograma real.
-- **✂ Cortes**: marca tramos a eliminar; el resto se une solo. **Transiciones**
-  opcionales: fundido de entrada/salida y **fundido cruzado** en los cortes.
-- **Insertar vídeos** en la línea de tiempo (una **intro**, un corte de relleno o un
-  **cierre**): se intercalan en el punto que elijas y admiten **tamaño proporcional**
-  (% del lienzo). Se normalizan solos aunque tengan otra resolución, fps o no lleven audio.
-- **Doble clic sobre cualquier elemento** abre sus ajustes (texto, color, opacidad,
-  intensidad del difuminado, imagen, escala del vídeo insertado…).
-- **Guardar el proyecto** (`.csedit`) para seguir editando otro día: conserva los
-  elementos, sus tiempos, los cortes, los vídeos insertados y las transiciones.
-- **Croma** para imágenes con fondo verde y blur con vista previa real difuminada.
-- Exporta todo en **una pasada** a un archivo nuevo: el original nunca se toca y
-  el audio se conserva. La selección de zonas a censurar (privacidad/foco/Docente)
-  también es **visual**: dibuja el rectángulo sobre un fotograma.
+## More free local-first tools
 
-### Post-producción con IA local (el foso)
-- **Subtítulos automáticos** (Whisper) → `.srt`, opción de **quemarlos** y traducir a inglés.
-- **Recorte de silencios** (auto-jumpcut): un tutorial con pausas queda fluido en un clic.
-- **Auto-encuadre** que **sigue al sujeto** (recorte dinámico, también en vertical 9:16),
-  por detección de movimiento — sin GPU ni dependencias extra.
-- **Capítulos automáticos** por tema → `capítulos.txt` (YouTube), índice HTML clicable
-  y capítulos incrustados en el MP4.
-- **Control de calidad**: la app se audita sola (audio mudo/saturado, sin voz, pantalla
-  en negro) y ofrece **arreglo de un clic** (normalizar audio).
-- **Escudo de privacidad** (difumina datos sensibles, incl. retroactivo) y **foco de
-  ventana** (oscurece todo menos lo que explicas).
-- **Fábrica de contenido**: una grabación → vertical 9:16 + audio MP3 + SRT.
-- **Exportar a GIF**: convierte una grabación (el **vídeo completo** o un **tramo** a
-  elegir) en un **GIF optimizado** (paleta de 2 pasadas, buena calidad), con **ancho y
-  fps** ajustables — ideal para demos y previews. La grabación se guarda en MP4; el GIF
-  es una conversión en post.
-- Todo **offline y privado**: ni una palabra sale de tu PC.
+Every tool in this family follows the same rules: free, open source, and nothing leaves your PC.
 
-### Atajos globales (remapeables)
-Funcionan aunque la app no tenga el foco. Se pueden **reasignar** desde
-*Ayuda → Atajos de teclado* (captura la combinación al vuelo).
-
-| Atajo por defecto | Acción |
+| Tool | What it does |
 |---|---|
-| `Ctrl+Shift+R` | Iniciar / detener grabación |
-| `Ctrl+Shift+P` | Pausar / reanudar |
-| `Ctrl+Shift+D` | Iniciar / detener directo |
-| `Ctrl+Shift+M` | Guardar momento (replay) |
+| [CapturaPro](https://github.com/Octonove/capturapro) | Screenshots, GIFs and screen recordings for Windows — annotated, watermark-free, 100% local. |
+| [TranscriptorIA](https://github.com/Octonove/transcriptor-ia) | Audio & video to text and .srt subtitles with local Whisper AI — free, private, unlimited. |
+| [PDFLocal](https://github.com/Octonove/pdflocal) | The full PDF toolbox for Windows: merge, split, compress, sign, OCR and chat with your documents — no uploads. |
+| [CajaPDF](https://github.com/Octonove/cajapdf) | The tiny PDF utility: merge, split and compress — free, offline, no accounts. |
+| [GuiaClick](https://github.com/Octonove/guiaclick) | Record your clicks, get a step-by-step guide — annotated screenshots, blur, PDF/HTML export. Like Scribe, but local. |
+| [ActaLocal](https://github.com/Octonove/actalocal) | Meetings → minutes: local Whisper transcription plus AI summary, decisions and action items. |
+| [AutoEscritorio](https://github.com/Octonove/autoescritorio) | Trigger→action automation for Windows: watch folders, hotkeys, USB, clipboard — simple and local. |
+| [BalanceLocal](https://github.com/Octonove/balancelocal) | Your work Wrapped: where your time actually goes, as shareable cards, a PDF report and a mini-video. |
+| [CajaNegra](https://github.com/Octonove/cajanegra) | A dashcam for your PC: the last minutes of your screen, one hotkey away from a perfect incident report. |
+| [FichajeLocal](https://github.com/Octonove/fichajelocal) | A local time-clock kiosk for small business: PIN check-in, tamper-evident records, accountant-ready reports. |
+| [ITVLocal](https://github.com/Octonove/itvlocal) | An MOT-style inspection for your PC: 1–3 minutes, a 0–10 score and a PDF certificate. Inspects, never modifies. |
+| [SonarArchivo](https://github.com/Octonove/sonararchivo) | Find files by what's INSIDE them: local full-text search over your messy folders and old drives. |
 
-## Ejecutar en desarrollo
-```powershell
-./run.ps1
-```
-(usa el venv de CapturaPro, que comparte dependencias; o crea uno con `requirements.txt`)
+Also: **[CRBRO](https://github.com/Octonove/crbro-memory)** — persistent neural memory for AI agents (MCP server).
 
-## Construir el ejecutable (.exe)
-```powershell
-./build/build.ps1
-```
-→ `dist\CapturaStudio\CapturaStudio.exe` (FFmpeg incluido, portable).
+## License
 
-## Crear el instalador único
-```powershell
-./build/build-installer.ps1
-```
-→ `installer\CapturaStudio-Setup-1.0.0.exe` (instala sin admin, con accesos directos y desinstalador).
-Requiere [Inno Setup](https://jrsoftware.org/isinfo.php).
-
-## Notas técnicas
-- **Compositing en el render**: la escena (modelo declarativo de capas) se traduce a
-  un `filter_complex` de FFmpeg (overlay/scale/crop/máscara circular/opacidad) que
-  se materializa al grabar o emitir. El vídeo final va a fps completos.
-- **Audio en directo**: micro+sistema se mezclan en Python y se canalizan por
-  `stdin` (s16le) al proceso de FFmpeg.
-- **IA local**: filtro `whisper` de FFmpeg para subtítulos y `silencedetect` para
-  el recorte. El modelo se descarga la primera vez (robusto frente a antivirus que
-  interceptan TLS: `curl --ssl-no-revoke` → .NET → urllib).
-
-## Stack
-Python 3.14 + Tkinter + FFmpeg (full build) + Pillow + mss + numpy + soundcard +
-PyInstaller + Inno Setup. Licencia **MIT** (ver `LICENSE` y `THIRD-PARTY-NOTICES.md`).
+[MIT](LICENSE) — see also [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) where present.
