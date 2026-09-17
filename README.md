@@ -12,6 +12,11 @@ An OBS-style recording & streaming studio with local AI superpowers — record, 
 
 > 🇪🇸 ¿Prefieres leerlo en español? → **[README en español](README.es.md)**
 
+<!-- invokard-coffee -->
+**&#9749; If this saves you time, buy me a coffee.** [![Buy me a coffee with PayPal](https://img.shields.io/badge/PayPal-Buy%20me%20a%20coffee-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=stradoxx%40gmail.com&no_recurring=0&currency_code=EUR&item_name=Support%20capturastudio)
+
+**USDC** &middot; Solana `5n6Gfosk7SdwbvdtE9xiLWpcGPBBBGDZYRfAkWyCk86g` &middot; Ethereum (ERC-20) `0xe176866f9d7fdb498e0d4a983d3e34d84dcd6bfc`
+
 ## Features
 
 - Layered scenes: screen, **occlusion-proof window capture (WGC)**, webcam with chroma key, images, text and media
