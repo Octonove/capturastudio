@@ -10,7 +10,12 @@ por un compositor GPU en vivo, compone la escena en el **render** con FFmpeg
 <!-- invokard-coffee -->
 **&#9749; Si esto te ahorra tiempo, inv&iacute;tame a un caf&eacute;.** [![Inv&iacute;tame a un caf&eacute; con PayPal](https://img.shields.io/badge/PayPal-Inv%C3%ADtame%20a%20un%20caf%C3%A9-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/donate/?business=stradoxx%40gmail.com&no_recurring=0&currency_code=EUR&item_name=Support%20capturastudio)
 
-**USDC** &middot; Solana `5n6Gfosk7SdwbvdtE9xiLWpcGPBBBGDZYRfAkWyCk86g` &middot; Ethereum (ERC-20) `0xe176866f9d7fdb498e0d4a983d3e34d84dcd6bfc`
+O en USDC. Env&iacute;a **solo USDC** y **solo por la red indicada**; por otra red se pierde y no hay forma de recuperarlo.
+
+| Red | Direcci&oacute;n USDC |
+|---|---|
+| **Solana** | `5n6Gfosk7SdwbvdtE9xiLWpcGPBBBGDZYRfAkWyCk86g` |
+| **Ethereum** (ERC-20) | `0xe176866f9d7fdb498e0d4a983d3e34d84dcd6bfc` |
 
 ## ⬇️ Descargar (Windows 10/11)
 
